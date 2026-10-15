@@ -29,11 +29,8 @@ class ContentRepository(val http: OkHttpClient = OkHttpClient.Builder().connectT
     private val site = "https://hongguoduanju.com"
     private data class SearchCursor(val searchId: String, val passback: String, val offset: Int?, val updatedAt: Long)
     private val searchCursors=linkedMapOf<Triple<ContentType,String,Int>,SearchCursor>()
-    private fun text(url: String, signed: Signer.Request? = null): String {
-        val request = Request.Builder().url(url).header("User-Agent",VendorConstants.VIDEO_UA).header("Accept-Language","zh-CN,zh;q=0.9")
-        signed?.headers?.forEach { (k,v) -> request.header(k,v) }
-        signed?.body?.let { request.post(it.toRequestBody("application/json; charset=utf-8".toMediaType())) }
-        return RequestScope.execute(http.newCall(request.build())) { response ->
+    private fun execute(request: Request): String {
+        return RequestScope.execute(http.newCall(request)) { response ->
             if (!response.isSuccessful) throw IOException("内容请求失败（HTTP ${response.code}）")
             val body = response.body ?: throw IOException("内容响应为空")
             if (body.contentLength() > 16*1024*1024) throw IOException("内容响应过大")
@@ -42,6 +39,12 @@ class ContentRepository(val http: OkHttpClient = OkHttpClient.Builder().connectT
             if(bytes.size > 16*1024*1024) throw IOException("内容响应过大")
             String(bytes,Charsets.UTF_8)
         }
+    }
+    private fun text(url: String, signed: Signer.Request? = null): String {
+        val request = Request.Builder().url(url).header("User-Agent",VendorConstants.VIDEO_UA).header("Accept-Language","zh-CN,zh;q=0.9")
+        signed?.headers?.forEach { (k,v) -> request.header(k,v) }
+        signed?.body?.let { request.post(it.toRequestBody("application/json; charset=utf-8".toMediaType())) }
+        return execute(request.build())
     }
     private fun router(url: String) = extractRouter(text(url)).getJSONObject("loaderData")
     private fun card(item: JSONObject): Series {
@@ -123,11 +126,68 @@ class ContentRepository(val http: OkHttpClient = OkHttpClient.Builder().connectT
         if(episodes.isEmpty() || episodes.any { !it.matches(Regex("[0-9]{1,30}")) } || episodes.distinct().size!=episodes.size) throw IOException("分集数据异常")
         return Detail(card(o).copy(id=id),episodes)
     }
+
+    /**
+     * 拉取 video_model。
+     *
+     * 上游拒绝带签名的请求（返回 Code 110001），因此先按可工作的 Python 实现的方式尝试：
+     * 无签名 + 每次随机 device_id/iid + 多域名轮询；全部失败再回退原带签名请求。
+     * 随机设备号保持 18 位（10^17 ~ 10^18），避免被上游当作异常设备。
+     */
+    private fun randomDevice(): Map<String,String> {
+        val id=(900000000000000000L..999999999999999999L).random().toString()
+        return VendorConstants.device + mapOf("device_id" to id, "iid" to id)
+    }
+    private val videoApiCandidates = listOf(
+        "https://api5-normal-sinfonlinec.fqnovel.com/novel/player/multi_video_model/v1/",
+        "https://api5-normal-sinfonlineb.fqnovel.com/novel/player/multi_video_model/v1/",
+        "https://api5-normal-lf.fqnovel.com/novel/player/multi_video_model/v1/",
+        "https://api5-normal.fqnovel.com/novel/player/multi_video_model/v1/",
+    )
+    private fun videoModelOk(body: String): Boolean = runCatching {
+        val o=JSONObject(body)
+        o.optInt("Code",o.optInt("code",0))==0 && o.optJSONObject("data") != null
+    }.getOrDefault(false)
+
+    private fun unsignedVideoModel(body: ByteArray): JSONObject? {
+        for (base in videoApiCandidates) {
+            val url="$base?"+Signer.encode(randomDevice())
+            val headers=linkedMapOf(
+                "User-Agent" to VendorConstants.VIDEO_MODEL_UA,
+                "Accept" to "application/json; charset=utf-8,application/x-protobuf",
+                "Content-Type" to "application/json; charset=UTF-8",
+                "x-xs-from-web" to "0",
+                "x-ss-req-ticket" to clock().toString(),
+                "x-tt-request-tag" to "t=0;n=0",
+                "sdk-version" to "2",
+                "passport-sdk-version" to "50561",
+                "x-vc-bdturing-sdk-version" to "3.7.2.cn",
+            )
+            try {
+                val request=Request.Builder().url(url)
+                headers.forEach { (k,v) -> request.header(k,v) }
+                val raw=execute(request.post(body.toRequestBody("application/json; charset=UTF-8".toMediaType())).build())
+                if (videoModelOk(raw)) return JSONObject(raw)
+            } catch (_: IOException) {
+                // 网络异常或上游非 2xx，换下一个域名继续
+            }
+        }
+        return null
+    }
+
+    private fun videoModel(payload: ByteArray): JSONObject {
+        unsignedVideoModel(payload)?.let { return it }
+        // 回退：原带签名请求（部分网络环境下可能仍被接受）
+        val signed=signer.sign(videoApiCandidates[1],VendorConstants.device,payload)
+        val raw=text(signed.url,signed)
+        if (videoModelOk(raw)) return JSONObject(raw)
+        throw IOException("播放接口暂不可用")
+    }
+
     fun stream(id: String, maxQuality: Int = 1080): StreamInfo {
         require(id.matches(Regex("[0-9]{1,30}")))
         val payload="""{"biz_param":{"detail_page_version":0,"device_level":3,"disable_digg_stat":false,"need_all_video_definition":true,"need_mp4_align":false,"use_os_player":false,"use_server_dns":false,"video_platform":1024},"mixed_video_id_map":{"1004":["$id"]}}""".toByteArray()
-        val signed=signer.sign("https://api5-normal-sinfonlineb.fqnovel.com/novel/player/multi_video_model/v1/",VendorConstants.device,payload)
-        val data=JSONObject(text(signed.url,signed))
+        val data=videoModel(payload)
         if(data.optInt("Code",data.optInt("code",0))!=0) throw IOException("播放接口暂不可用")
         val map=data.optJSONObject("data") ?: throw IOException("播放信息为空")
         val entry=map.optJSONObject(id) ?: map.keys().asSequence().mapNotNull { map.optJSONObject(it) }.firstOrNull() ?: throw IOException("播放信息为空")
