@@ -436,16 +436,65 @@ function signedVideoRequest(payload) {
     return { url, headers, body };
 }
 
+// 播放接口备选域名。实测结论：带签名的请求常被拒（110001 未知异常），
+// 无签名 + 每次随机 device_id/iid + 多域名轮询可稳定返回 video_model。
+// 优先 sinfonlinec（与可工作的 Python 实现一致），b/lf/裸域作为回退。
+const VIDEO_API_CANDIDATES = [
+    'https://api5-normal-sinfonlinec.fqnovel.com/novel/player/multi_video_model/v1/',
+    'https://api5-normal-sinfonlineb.fqnovel.com/novel/player/multi_video_model/v1/',
+    'https://api5-normal-lf.fqnovel.com/novel/player/multi_video_model/v1/',
+    'https://api5-normal.fqnovel.com/novel/player/multi_video_model/v1/',
+];
+const VIDEO_MODEL_APP_UA = 'com.phoenix.read/71332 (Linux; U; Android 16; zh_CN; 25053RT47C; Build/BP2A.250605.031.A3; Cronet/TTNetVersion:04657795 2026-01-23 QuicVersion:c67e9834 2025-09-08)';
+const randomDeviceId = () => String(Math.floor(1e17 + Math.random() * (1e18 - 1e17)));
+// 无签名请求的设备参数：设备 id 每次随机生成（固定设备指纹会被上游拒绝）
+const unsignedVideoParams = () => ({
+    iid: randomDeviceId(), device_id: randomDeviceId(), ac: 'wifi', channel: 'update_64', aid: '8662', app_name: 'novelread',
+    version_code: '71332', version_name: '7.1.3.32', device_platform: 'android', os: 'android',
+    ssmix: 'a', device_type: '25053RT47C', device_brand: 'Redmi', language: 'zh', os_api: '36',
+    os_version: '16', manifest_version_code: '71332', resolution: '1280*2772', dpi: '520',
+    update_version_code: '71332', host_abi: 'arm64-v8a', dragon_device_type: 'phone', pv_player: '71332',
+    compliance_status: '0', need_personal_recommend: '1', player_so_load: '1', is_android_pad_screen: '0',
+});
+const videoModelOk = (resp, data) => resp.status === 200 && data && Number(data.Code ?? data.code ?? 0) === 0 && data.data;
+
 async function requestVideoModel(vid) {
     const payload = JSON.stringify({
         biz_param: { detail_page_version: 0, device_level: 3, disable_digg_stat: false, need_all_video_definition: true, need_mp4_align: false, use_os_player: false, use_server_dns: false, video_platform: 1024 },
         mixed_video_id_map: { '1004': [str(vid)] },
     });
-    const signed = signedVideoRequest(payload);
-    const resp = await axios.post(signed.url, signed.body, { headers: signed.headers, timeout: 20000, responseType: 'text' });
-    const data = jsonBody(resp.data);
-    if (resp.status !== 200 || !data || Number(data.Code || data.code || 0) !== 0) throw new Error(`video_model failed: ${data?.Message || data?.message || resp.status}`);
-    return data;
+    const body = Buffer.from(payload);
+    let lastError = null;
+
+    // 第一优先：无签名 + 随机设备 + 多域名（实测可稳定取到 video_model）
+    for (const api of VIDEO_API_CANDIDATES) {
+        try {
+            const url = `${api}?${pythonUrlEncode(unsignedVideoParams())}`;
+            const headers = {
+                'User-Agent': VIDEO_MODEL_APP_UA, Accept: 'application/json; charset=utf-8,application/x-protobuf', 'Content-Type': 'application/json; charset=UTF-8',
+                'x-xs-from-web': '0', 'x-ss-req-ticket': String(Date.now()), 'x-tt-request-tag': 't=0;n=0',
+                'sdk-version': '2', 'passport-sdk-version': '50561', 'x-vc-bdturing-sdk-version': '3.7.2.cn',
+            };
+            const resp = await axios.post(url, body, { headers, timeout: 20000, responseType: 'text' });
+            const data = jsonBody(resp.data);
+            if (videoModelOk(resp, data)) return data;
+            lastError = new Error(`video_model failed: ${data?.Message || data?.message || (data?.Code ?? data?.code) || resp.status}`);
+        } catch (e) {
+            lastError = e;
+        }
+    }
+
+    // 回退：原带签名请求（部分网络环境下可能仍被接受）
+    try {
+        const signed = signedVideoRequest(payload);
+        const resp = await axios.post(signed.url, body, { headers: signed.headers, timeout: 20000, responseType: 'text' });
+        const data = jsonBody(resp.data);
+        if (videoModelOk(resp, data)) return data;
+        lastError = new Error(`video_model failed: ${data?.Message || data?.message || resp.status}`);
+    } catch (e) {
+        lastError = e;
+    }
+    throw lastError ?? new Error('video_model failed: 未知异常');
 }
 
 function modelForVideo(data, vid) {
