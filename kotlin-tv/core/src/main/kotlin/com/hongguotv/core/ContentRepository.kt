@@ -22,6 +22,9 @@ data class RankPosition(val rank: Int?, val heat: String)
 data class ComicRanking(val positions: Map<String,RankPosition>, val totalPages: Int, val updatedText: String)
 data class CatalogPage(val items: List<Series>, val hasMore: Boolean, val ranking: ComicRanking? = null)
 data class StreamInfo(val url: String, val key: ByteArray?, val quality: String)
+
+/** 一条弹幕：offsetMillis 为弹幕在视频中的位置，digg 为点赞数 */
+data class Danmaku(val offsetMillis: Long, val text: String, val digg: Int)
 class SearchSessionExpiredException: IOException("搜索结果已过期，请从第 1 页重新搜索")
 
 class ContentRepository(val http: OkHttpClient = OkHttpClient.Builder().connectTimeout(15,TimeUnit.SECONDS).readTimeout(30,TimeUnit.SECONDS).callTimeout(45,TimeUnit.SECONDS).build(), private val clock: () -> Long = System::currentTimeMillis) {
@@ -210,6 +213,48 @@ class ContentRepository(val http: OkHttpClient = OkHttpClient.Builder().connectT
         val quality=if(selected.first>0) "${selected.first}P"+(if(selected.first>maxQuality) "（兼容资源）" else "") else "自动"
         return StreamInfo(url,key,quality)
     }
+
+    /**
+     * 拉取一集的弹幕（官方客户端把弹幕复用评论列表接口：
+     * POST /novel/commentapi/comment/list/{vid}/v1/，group_type=30、comment_source=601、
+     * comment_type=20、server_channel=1000、count=90）。评论接口必须携带设备签名
+     * （无签名返回 110001），且与播放接口同样拒绝 branch=1 的签名变体，
+     * Signer.sign 内部已做 ticket 抖动。按 offset_time（毫秒）升序返回。
+     */
+    fun danmaku(seriesId: String, episodeId: String, maxItems: Int = 900, maxPages: Int = 12): List<Danmaku> {
+        require(seriesId.matches(Regex("[0-9]{1,30}")) && episodeId.matches(Regex("[0-9]{1,30}")))
+        val base="https://api5-normal-sinfonlineb.fqnovel.com/novel/commentapi/comment/list/$episodeId/v1/"
+        val out=ArrayList<Danmaku>()
+        var cursor=""
+        repeat(maxPages) {
+            if(out.size>=maxItems) return out.sortedBy { it.offsetMillis }
+            val body=JSONObject()
+                .put("business_param",JSONObject().put("book_id",seriesId).put("playlet_item_duration",0).put("start_offset_time",0))
+                .put("comment_source",601).put("comment_type",20).put("count",90)
+                .put("group_id",episodeId).put("group_type",30).put("server_channel",1000).put("sort",1)
+            if(cursor.isNotEmpty()) body.put("cursor",cursor)
+            val signed=signer.sign(base,VendorConstants.device,body.toString().toByteArray())
+            val raw=text(signed.url,signed)
+            val o=JSONObject(raw)
+            if(o.optInt("Code",o.optInt("code",0))!=0) throw IOException("弹幕接口暂不可用")
+            val data=o.optJSONObject("data") ?: break
+            data.optJSONArray("data_list")?.objects()?.forEach { entry ->
+                val comment=entry.optJSONObject("comment") ?: return@forEach
+                val label=comment.optJSONObject("common")?.optJSONObject("content")?.str("text") ?: return@forEach
+                if(label.isEmpty()) return@forEach
+                val expand=comment.optJSONObject("expand") ?: return@forEach
+                val offset=if(expand.isNull("offset_time")) -1L else expand.optLong("offset_time",-1L)
+                if(offset<0) return@forEach
+                val digg=comment.optJSONObject("stat")?.optInt("digg_count",0) ?: 0
+                out+=Danmaku(offset,label,digg)
+            }
+            val info=data.optJSONObject("common_list_info") ?: break
+            cursor=info.str("cursor")
+            if(!info.optBoolean("has_more",false) || cursor.isEmpty()) break
+        }
+        return out.sortedBy { it.offsetMillis }
+    }
+
     companion object {
         fun extractRouter(html: String): JSONObject {
             val marker=html.indexOf("_ROUTER_DATA"); if(marker<0) throw IOException("页面没有内容数据")
