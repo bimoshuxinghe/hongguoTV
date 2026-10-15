@@ -65,7 +65,7 @@ class ArtworkLoader(context: Context) {
         Thread(runnable, "hongguotv-artwork").apply { priority = Thread.NORM_PRIORITY - 1 }
     }
     private val signal = Object()
-    private val pending = PriorityQueue<Job>(compareBy<Job> { it.priority }.thenBy { it.order })
+    private val pending = PriorityQueue<Job>(11, compareBy<Job> { it.priority }.thenBy { it.order })
     private val jobs = mutableMapOf<Key, Job>()
     private val bindings = WeakHashMap<ImageView, Binding>()
     private var owner = 0L
