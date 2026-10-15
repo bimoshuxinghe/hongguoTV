@@ -226,7 +226,9 @@ class ContentRepository(val http: OkHttpClient = OkHttpClient.Builder().connectT
         val base="https://api5-normal-sinfonlineb.fqnovel.com/novel/commentapi/comment/list/$episodeId/v1/"
         val out=ArrayList<Danmaku>()
         var cursor=""
-        repeat(maxPages) {
+        var page=0
+        while(page<maxPages) {
+            page++
             if(out.size>=maxItems) return out.sortedBy { it.offsetMillis }
             val body=JSONObject()
                 .put("business_param",JSONObject().put("book_id",seriesId).put("playlet_item_duration",0).put("start_offset_time",0))
