@@ -1,0 +1,88 @@
+name: Probe comment APIs
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Probe candidate comment endpoints
+        run: |
+          python3 - <<'PY'
+          import json, random, re, subprocess, urllib.parse, html as htmlmod
+
+          SITE = 'https://hongguoduanju.com'
+          UA = 'com.phoenix.read/71332 (Linux; U; Android 16; zh_CN; 25053RT47C; Build/BP2A.250605.031.A3; Cronet/TTNetVersion:04657795 2026-01-23 QuicVersion:c67e9834 2025-09-08)'
+
+          def curl(url, extra=()):
+              out = subprocess.run(['curl', '-s', '--compressed', '--max-time', '20', '-w', '\n%{http_code}', url,
+                                    '-H', f'User-Agent: {UA}', '-H', 'Accept-Language: zh-CN,zh;q=0.9', *extra],
+                                   capture_output=True, text=True).stdout
+              body, _, code = out.rpartition('\n')
+              return code.strip(), body
+
+          rnd = lambda: str(random.randint(10**17, 10**18 - 1))
+          def common():
+              return {'iid': rnd(), 'device_id': rnd(), 'ac': 'wifi', 'channel': 'update_64', 'aid': '8662',
+                      'app_name': 'novelread', 'version_code': '71332', 'version_name': '7.1.3.32',
+                      'device_platform': 'android', 'os': 'android', 'ssmix': 'a', 'device_type': '25053RT47C',
+                      'device_brand': 'Redmi', 'language': 'zh', 'os_api': '36', 'os_version': '16',
+                      'manifest_version_code': '71332', 'resolution': '1280*2772', 'dpi': '520',
+                      'update_version_code': '71332', 'host_abi': 'arm64-v8a', 'dragon_device_type': 'phone',
+                      'pv_player': '71332', 'compliance_status': '0', 'need_personal_recommend': '1',
+                      'player_so_load': '1', 'is_android_pad_screen': '0'}
+          def enc(values):
+              return '&'.join(f"{urllib.parse.quote(k, safe='')}={urllib.parse.quote(str(v), safe='!()*')}" for k, v in values.items())
+
+          _, rank_html = curl(f'{SITE}/rank/hot-drama')
+          m = re.search(r'series_id[=/](\d{15,25})', rank_html)
+          series_id = m.group(1) if m else '7695704804978330649'
+          print('series_id =', series_id)
+
+          code, detail = curl(f'{SITE}/detail?series_id={series_id}')
+          start = detail.index('_ROUTER_DATA'); first = detail.index('{', start)
+          depth = 0; quote = False; escaped = False; vid = None
+          for i in range(first, len(detail)):
+              ch = detail[i]
+              if quote:
+                  if escaped: escaped = False
+                  elif ch == '\\': escaped = True
+                  elif ch == '"': quote = False
+                  continue
+              if ch == '"': quote = True
+              elif ch in '{[': depth += 1
+              elif ch in '}]':
+                  depth -= 1
+                  if depth == 0:
+                      data = json.loads(detail[first:i + 1]); break
+          def walk(node):
+              global vid
+              if vid or not isinstance(node, (dict, list)): return
+              if isinstance(node, dict):
+                  vl = node.get('vid_list')
+                  if isinstance(vl, list) and vl and isinstance(vl[0], str): vid = vl[0]; return
+                  for v in node.values(): walk(v)
+              else:
+                  for v in node: walk(v)
+          walk(data)
+          print('vid =', vid)
+          if not vid: raise SystemExit('no vid')
+
+          hosts = ['api5-normal-lf.fqnovocab.com', 'api5-normal-sinfonlineb.fqnovel.com',
+                   'api5-normal-lf.fqnovel.com', 'api5-normal-lf.snssdk.com', 'api5-normal.fqnovel.com',
+                   'api5-normal-lf.fqnovocab.net']
+          paths = ['/lvpi/comment/v1/list/call', '/lvpi/comment/v1/list', '/novel/comment/v1/list/call',
+                   '/comment/v1/list/call', '/novel/comment/list/v1', '/reading/bookapi/comment/list/v']
+          for host in hosts:
+              for path in paths:
+                  url = f'https://{host}{path}?{enc({**common(), "group_id": vid, "item_id": vid, "count": 10, "offset": 0, "sort": 0})}'
+                  try:
+                      code, body = curl(url, ('-H', 'x-ss-req-ticket: ' + str(random.randint(1700000000000, 1800000000000)),
+                                              '-H', 'x-tt-request-tag: t=0;n=0', '-H', 'sdk-version: 2',
+                                              '-H', 'Accept: application/json; charset=utf-8,application/x-protobuf'))
+                      print(f'{host}{path} -> {code}: {" ".join(body.split())[:200]}')
+                  except Exception as e:
+                      print(f'{host}{path} -> ERR {e}')
+          PY
