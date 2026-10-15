@@ -17,7 +17,7 @@ android {
     buildFeatures { buildConfig = true }
     signingConfigs {
         create("delivery") {
-            storeFile = signingValue("HONGGUOTV_KEYSTORE", "storeFile")?.let { file(it) }
+            storeFile = signingValue("HONGGUOTV_KEYSTORE", "storeFile")?.let { rootProject.file(it) }
             storePassword = signingValue("HONGGUOTV_STORE_PASSWORD", "storePassword")
             keyAlias = signingValue("HONGGUOTV_KEY_ALIAS", "keyAlias")
             keyPassword = signingValue("HONGGUOTV_KEY_PASSWORD", "keyPassword")
