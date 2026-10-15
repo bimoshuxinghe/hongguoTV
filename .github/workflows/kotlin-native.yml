@@ -22,8 +22,18 @@ jobs:
         with:
           packages: platform-tools
       - run: sdkmanager 'platforms;android-36' 'build-tools;36.0.0'
-      - name: Unit tests, Android lint, and installable development APK
-        run: ./kotlin-tv/gradlew -p kotlin-tv :core:test :app:lintDebug :app:assembleDebug --console=plain
+      - name: Unit tests, Android lint, and signed APKs
+        env:
+          HONGGUOTV_KEYSTORE_B64: ${{ secrets.HONGGUOTV_KEYSTORE_B64 }}
+          HONGGUOTV_STORE_PASSWORD: ${{ secrets.HONGGUOTV_STORE_PASSWORD }}
+          HONGGUOTV_KEY_ALIAS: ${{ secrets.HONGGUOTV_KEY_ALIAS }}
+          HONGGUOTV_KEY_PASSWORD: ${{ secrets.HONGGUOTV_KEY_PASSWORD }}
+        run: |
+          if [ -n "$HONGGUOTV_KEYSTORE_B64" ]; then
+            printf '%s' "$HONGGUOTV_KEYSTORE_B64" | base64 -d > kotlin-tv/release.jks
+            export HONGGUOTV_KEYSTORE=release.jks
+          fi
+          ./kotlin-tv/gradlew -p kotlin-tv :core:test :app:lintDebug :app:assembleDebug :app:assembleRelease --console=plain
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         if: always()
         with:
@@ -32,3 +42,4 @@ jobs:
             kotlin-tv/core/build/reports/tests/test/
             kotlin-tv/app/build/reports/lint-results-debug.*
             kotlin-tv/app/build/outputs/apk/debug/*.apk
+            kotlin-tv/app/build/outputs/apk/release/*.apk
