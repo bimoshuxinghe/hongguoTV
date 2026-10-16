@@ -61,21 +61,38 @@ class ContentRepository(val http: OkHttpClient = OkHttpClient.Builder().connectT
         require(page in 1..100)
         return ComicRank.parse(text("$site/rank/hot-comic-drama?page=$page"),page)
     }
-    fun home(page: Int = 1, type: ContentType = ContentType.SHORT): CatalogPage {
-        require(page in 1..100)
-        if(type==ContentType.COMIC) return comicRanking(page)
-        val data=router("$site/category?tab=1&sort_type=1"+if(page>1) "&page=$page" else "")
-        val section=data.optJSONObject("category_page") ?: data.optJSONObject("category_$") ?: throw IOException("首页数据结构已变化")
-        val rows=section.optJSONArray("recommendList") ?: section.optJSONObject("categoryData")?.optJSONArray("recommendList") ?: throw IOException("首页数据暂不可用")
+
+    /** 官网题材分类（/category/real-drama/{slug}），实测每页 24 条、深翻页可用 */
+    object Genres {
+        val items: Map<String,String> = linkedMapOf(
+            "romance" to "爱情","comeback" to "逆袭","suspense" to "悬疑","costume" to "古装","urban" to "都市",
+            "fantasy" to "玄幻","comedy" to "喜剧","family" to "家庭","period" to "年代","youth" to "青春",
+            "legend" to "传奇","growth" to "成长","clan" to "家族","cute-kids" to "萌宝","sci-fi" to "科幻",
+            "supernatural" to "志怪","wonder" to "奇幻","thriller" to "惊悚","horror" to "恐怖","disaster" to "灾难",
+            "action-adventure" to "动作冒险","war" to "战争","variety" to "综艺","drama" to "剧情")
+    }
+    fun genre(slug: String, page: Int = 1): CatalogPage {
+        require(slug in Genres.items && page in 1..100)
+        return parseCategory("$site/category/real-drama/$slug",page)
+    }
+    private fun parseCategory(url: String, page: Int): CatalogPage {
+        val data=router(url+if(page>1) "?page=$page" else "")
+        val section=data.optJSONObject("category_page") ?: data.optJSONObject("category_$") ?: throw IOException("分类数据结构已变化")
+        val rows=section.optJSONArray("recommendList") ?: section.optJSONObject("categoryData")?.optJSONArray("recommendList") ?: JSONArray()
         val items=valid(rows.objects().map(::card))
         val lastPage=section.optJSONObject("pagination")?.optInt("totalPages",100) ?: 100
         return CatalogPage(items,items.isNotEmpty() && page<minOf(lastPage,100))
     }
+    fun home(page: Int = 1, type: ContentType = ContentType.SHORT): CatalogPage {
+        require(page in 1..100)
+        if(type==ContentType.COMIC) return comicRanking(page)
+        // 直连新版分类路由，避免旧 tab 参数多一跳 301 重定向
+        return parseCategory("$site/category/real-drama",page)
+    }
     fun search(keyword: String, page: Int = 1, type: ContentType = ContentType.SHORT): CatalogPage {
         require(keyword.isNotBlank() && keyword.length<=80 && page in 1..100)
-        // The website search does not constrain content type. Never use it for comics.
-        if(type==ContentType.COMIC) return appSearch(keyword,page,type)
-        try { val result=appSearch(keyword,page,type); if(result.items.isNotEmpty() || !result.hasMore) return result } catch (e: Exception) { if(e is SearchSessionExpiredException) throw e; /* Website fallback for short dramas only. */ }
+        // 漫剧 tab 的搜索接口不可用；短剧 tab 的搜索会同时返回短剧与漫剧内容，统一走短剧搜索。
+        try { val result=appSearch(keyword,page,ContentType.SHORT); if(result.items.isNotEmpty() || !result.hasMore) return result } catch (e: Exception) { if(e is SearchSessionExpiredException) throw e; /* Website fallback. */ }
         val data=router("$site/search/${Signer.encode(keyword)}?page=$page")
         val section=data.optJSONObject("search_(keyword)/page") ?: data.optJSONObject("search_page") ?: throw IOException("搜索数据暂不可用")
         val rows=section.optJSONArray("searchList") ?: throw IOException("搜索数据结构已变化")

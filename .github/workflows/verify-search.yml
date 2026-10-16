@@ -1,0 +1,18 @@
+name: Verify search & catalog paging
+on:
+  workflow_dispatch:
+  push:
+    paths: ['scripts/verify-search.mjs', 'server/vendor/hongguo.cjs', '.github/workflows/verify-search.yml']
+permissions:
+  contents: read
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Unified search (bookapi tab 11) & catalog paging
+        run: node scripts/verify-search.mjs
