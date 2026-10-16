@@ -159,20 +159,20 @@ class ContentRepositoryTest {
         assertTrue(page.hasMore)
     }
 
-    @Test fun comicSearchCarriesCursorAndKeepsTypesAndQueriesSeparate() {
+    @Test fun shortSearchCarriesCursorAcrossPages() {
         val requests=mutableListOf<Request>()
         val repo=repository { request ->
             requests+=request
-            JSONObject().put("code",0).put("search_tabs",JSONArray().put(searchTab(19,"999")
-                .put("search_id","comic-session").put("passback","comic-cursor").put("next_offset",25))).toString()
+            assertEquals("11",request.url.queryParameter("tab_type"))
+            JSONObject().put("code",0).put("search_tabs",JSONArray().put(searchTab(11,"999")
+                .put("search_id","short-session").put("passback","short-cursor").put("next_offset",25))).toString()
         }
-        repo.search("修仙",1,ContentType.COMIC)
-        repo.search("修仙",2,ContentType.COMIC)
-        assertEquals("comic-session",requests[1].url.queryParameter("search_id"))
-        assertEquals("comic-cursor",requests[1].url.queryParameter("passback"))
+        repo.search("修仙",1,ContentType.SHORT)
+        val second=repo.search("修仙",2,ContentType.SHORT)
+        assertEquals("short-session",requests[1].url.queryParameter("search_id"))
+        assertEquals("short-cursor",requests[1].url.queryParameter("passback"))
         assertEquals("25",requests[1].url.queryParameter("offset"))
-        assertThrows(SearchSessionExpiredException::class.java) { repo.search("重生",2,ContentType.COMIC) }
-        assertEquals(2,requests.size)
+        assertEquals(listOf("999"),second.items.map { it.id })
     }
 
     @Test fun expiredCursorRequestsFreshSearchInsteadOfDuplicateOffsetPage() {
@@ -180,21 +180,20 @@ class ContentRepositoryTest {
         var requests=0
         val repo=repository(clock={ now }) {
             requests++
-            JSONObject().put("code",0).put("search_tabs",JSONArray().put(searchTab(19,"999")
+            JSONObject().put("code",0).put("search_tabs",JSONArray().put(searchTab(11,"999")
                 .put("search_id","session").put("passback","cursor"))).toString()
         }
-        repo.search("修仙",1,ContentType.COMIC)
+        repo.search("修仙",1,ContentType.SHORT)
         now=300001L
-        assertThrows(SearchSessionExpiredException::class.java) { repo.search("修仙",2,ContentType.COMIC) }
-        assertEquals(1,requests)
-        repo.search("修仙",1,ContentType.COMIC)
-        repo.search("修仙",2,ContentType.COMIC)
+        repo.search("修仙",2,ContentType.SHORT)
+        assertEquals(2,requests)
+        repo.search("修仙",1,ContentType.SHORT)
         assertEquals(3,requests)
     }
 
     @Test fun shortHomeStillUsesCategoryAndStopsOnLastPage() {
         val repo=repository { request ->
-            assertEquals("1",request.url.queryParameter("tab"))
+            assertTrue(request.url.encodedPath.endsWith("/category/real-drama"))
             """<script>_ROUTER_DATA={"loaderData":{"category_$":{"recommendList":[{"series_id":"456","series_name":"测试短剧"}],"pagination":{"totalPages":1}}}};</script>"""
         }
         val result=repo.home(1,ContentType.SHORT)
@@ -206,32 +205,36 @@ class ContentRepositoryTest {
         .put("data",JSONArray().put(JSONObject().put("video_data",JSONArray().put(JSONObject()
             .put("series_id",id).put("title","测试剧集").put("episode_cnt",8)))))
 
-    @Test fun comicSearchRequestsAndSelectsOnlyComicTab() {
+    @Test fun unifiedSearchAlwaysUsesShortTab() {
         var requests=0
         val repo=repository { request ->
             requests++
-            assertEquals("19",request.url.queryParameter("tab_type"))
+            assertEquals("11",request.url.queryParameter("tab_type"))
             assertEquals(if(requests==1) "0" else "20",request.url.queryParameter("offset"))
             assertEquals("修仙",request.url.queryParameter("query"))
             JSONObject().put("code",0).put("search_tabs",JSONArray()
                 .put(searchTab(11,"111")).put(searchTab(19,"999"))).toString()
         }
-        repo.search("修仙",1,ContentType.COMIC)
-        assertEquals(listOf("999"),repo.search("修仙",2,ContentType.COMIC).items.map { it.id })
+        repo.search("修仙",1,ContentType.SHORT)
+        assertEquals(listOf("111"),repo.search("修仙",2,ContentType.SHORT).items.map { it.id })
     }
 
-    @Test fun emptyComicSearchDoesNotFallBackToShortResults() {
+    @Test fun emptyShortSearchDoesNotFallBackToWebsite() {
         var requests=0
-        val repo=repository { requests++; """{"code":0,"search_tabs":[{"tab_type":19,"data":[],"has_more":false}]}""" }
-        assertTrue(repo.search("无结果",1,ContentType.COMIC).items.isEmpty())
+        val repo=repository { requests++; """{"code":0,"search_tabs":[{"tab_type":11,"data":[],"has_more":false}]}""" }
+        assertTrue(repo.search("无结果",1,ContentType.SHORT).items.isEmpty())
         assertEquals(1,requests)
     }
 
-    @Test fun missingComicTabDoesNotFallBackToShortResults() {
-        var requests=0
-        val repo=repository { requests++; """{"code":0,"search_tabs":[{"tab_type":11,"data":[]}]}""" }
-        assertThrows(IOException::class.java) { repo.search("修仙",1,ContentType.COMIC) }
-        assertEquals(1,requests)
+    @Test fun missingShortTabFallsBackToWebsite() {
+        val paths=mutableListOf<String>()
+        val repo=repository { request ->
+            paths+=request.url.encodedPath
+            if(paths.size==1) """{"code":0,"search_tabs":[{"tab_type":19,"data":[]}]}"""
+            else """<script>_ROUTER_DATA={"loaderData":{"search_page":{"searchList":[{"series_id":"456","series_name":"测试短剧"}]}}}};</script>"""
+        }
+        assertEquals("456",repo.search("修仙",1,ContentType.SHORT).items.single().id)
+        assertEquals(2,paths.size)
     }
 
     @Test fun shortSearchKeepsWebsiteFallback() {
