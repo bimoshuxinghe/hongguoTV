@@ -94,8 +94,10 @@ class ContentRepository(val http: OkHttpClient = OkHttpClient.Builder().connectT
         // 漫剧 tab 的搜索接口不可用；短剧 tab 的搜索会同时返回短剧与漫剧内容，统一走短剧搜索。
         try { val result=appSearch(keyword,page,ContentType.SHORT); if(result.items.isNotEmpty() || !result.hasMore) return result } catch (e: Exception) { if(e is SearchSessionExpiredException) throw e; /* Website fallback. */ }
         val data=router("$site/search/${Signer.encode(keyword)}?page=$page")
-        val section=data.optJSONObject("search_(keyword)/page") ?: data.optJSONObject("search_page") ?: throw IOException("搜索数据暂不可用")
-        val rows=section.optJSONArray("searchList") ?: throw IOException("搜索数据结构已变化")
+        // 自适应：官网改版后 loaderData 下的键名可能变化，直接找含 searchList 的 section
+        var section: JSONObject?=null
+        for(key in data.keys()) { val v=data.optJSONObject(key); if(v!=null && v.has("searchList")) { section=v; break } }
+        val rows=section?.optJSONArray("searchList") ?: throw IOException("搜索数据暂不可用")
         val items=valid(rows.objects().map(::card))
         return CatalogPage(items,items.isNotEmpty() && page<100)
     }
