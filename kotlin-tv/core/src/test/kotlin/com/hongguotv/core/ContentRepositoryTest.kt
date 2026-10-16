@@ -226,6 +226,67 @@ class ContentRepositoryTest {
         assertTrue(detail.related.isEmpty())
     }
 
+    @Test fun detailParsesRelocatedVideoListRecommendations() {
+        // 官网 2026-10 改版：推荐列表移到 mergeLoaderData 的 videoList，不再有 recommendationGroups.related_list
+        val recommendations=JSONObject().put("videoList",JSONArray()
+            .put(JSONObject().put("series_id","888").put("series_name","相似好剧").put("episode_right_text","全80集")))
+        val args=JSONArray().put("detail_page").put(JSONArray().put(
+            JSONObject().put("key","recommendations").put("routerDataFnArgs",JSONArray().put(recommendations.toString()))))
+        val html="""<script>_ROUTER_DATA={"loaderData":{"detail_page":{"seriesDetail":{"series_id":"123","series_name":"本剧","vid_list":["111"]}}}};</script>""" +
+            script("mergeLoaderData",args)
+        val detail=repository { html }.detail("123")
+        assertEquals(listOf("888"),detail.related.map { it.id })
+        assertEquals("全80集",detail.related.single().badge)
+    }
+
+    @Test fun detailPrefersSortedSameFranchiseSeasons() {
+        val html="""<script>_ROUTER_DATA={"loaderData":{"detail_page":{"seriesDetail":{"series_id":"13","series_name":"万妖图录传第十三季","vid_list":["9"]}}}};</script>"""
+        val repo=repository { request ->
+            if(request.url.encodedPath=="/reading/bookapi/search/tab/v") {
+                JSONObject().put("code",0).put("search_tabs",JSONArray().put(searchTab(11,"0")
+                    .put("has_more",false)
+                    .put("data",JSONArray()
+                        .put(JSONObject().put("video_data",JSONArray().put(JSONObject().put("series_id","13").put("title","万妖图录传第十三季"))))
+                        .put(JSONObject().put("video_data",JSONArray().put(JSONObject().put("series_id","3").put("title","万妖图录传第三季"))))
+                        .put(JSONObject().put("video_data",JSONArray().put(JSONObject().put("series_id","0").put("title","万妖图录传"))))
+                        .put(JSONObject().put("video_data",JSONArray().put(JSONObject().put("series_id","1").put("title","万妖图录传第一季"))))
+                        .put(JSONObject().put("video_data",JSONArray().put(JSONObject().put("series_id","77").put("title","别的剧"))))))).toString()
+            } else html
+        }
+        val detail=repo.detail("13")
+        // 本剧自己被排除、无关剧被过滤，各季按季数排序（无季数的基础名最前）
+        assertEquals(listOf("0","1","3"),detail.related.map { it.id })
+    }
+
+    @Test fun seasonHelpersParseChineseNumerals() {
+        assertEquals("谁说纨绔不能当状元",ContentRepository.seasonBaseName("谁说纨绔不能当状元第五季"))
+        assertNull(ContentRepository.seasonBaseName("万妖图录传"))
+        assertEquals(5,ContentRepository.seasonNumber("谁说纨绔不能当状元第五季"))
+        assertEquals(13,ContentRepository.seasonNumber("万妖图录传第十三季"))
+        assertEquals(21,ContentRepository.seasonNumber("剧名第二十一季"))
+        assertEquals(9,ContentRepository.seasonNumber("剧名 第9季"))
+        assertNull(ContentRepository.seasonNumber("万妖图录传"))
+        assertTrue(ContentRepository.sameFranchise("万妖图录传","万妖图录传第二季"))
+        assertTrue(ContentRepository.sameFranchise("万妖图录传","万妖图录传"))
+        assertFalse(ContentRepository.sameFranchise("万妖图录传","万妖图录传人"))
+        assertFalse(ContentRepository.sameFranchise("万妖图录传","万妖图录传番外"))
+    }
+
+    @Test fun comicHomeContinuesIntoComicCategoryAfterFiveRankPages() {
+        // 官网漫剧热播榜固定 5 页；第 6 页起直接续接 /category/comic-drama（页码-1 对齐）
+        val paths=mutableListOf<String>()
+        val repo=repository { request ->
+            paths+=request.url.encodedPath+"?"+(request.url.queryParameter("page")?:"")
+            """<script>_ROUTER_DATA={"loaderData":{"category_$":{"recommendList":[{"series_id":"789","series_name":"分类漫剧"}],"pagination":{"totalPages":34,"pageNum":5}}}};</script>"""
+        }
+        val six=repo.home(6,ContentType.COMIC)
+        assertEquals(listOf("/category/comic-drama?5"),paths)
+        assertEquals("789",six.items.single().id)
+        assertTrue(six.hasMore)
+        assertTrue(repo.home(7,ContentType.COMIC).hasMore)
+        assertEquals("/category/comic-drama?6",paths.last())
+    }
+
     private fun searchTab(type: Int,id: String) = JSONObject().put("tab_type",type).put("has_more",true)
         .put("data",JSONArray().put(JSONObject().put("video_data",JSONArray().put(JSONObject()
             .put("series_id",id).put("title","测试剧集").put("episode_cnt",8)))))

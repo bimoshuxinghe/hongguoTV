@@ -39,6 +39,29 @@ class PhoneSearchServerTest {
             assertFalse(submitted)
         }
     }
+    @Test fun `secure mode and trailing slash origins still submit`() {
+        // 部分手机浏览器的“HTTPS 优先/安全模式”会把来源标成 https 或带尾斜杠，不应误报“来源不匹配”
+        val received=CountDownLatch(1)
+        PhoneSearchServer("127.0.0.1",{ received.countDown() }).use { server ->
+            val path=URI(server.url).path+"/submit"
+            val authority=URI(server.url).rawAuthority
+            assertTrue(request(server,"POST",path,"query=测试","Origin: https://$authority\r\n").startsWith("HTTP/1.1 200"))
+        }
+        assertTrue(received.await(2,TimeUnit.SECONDS))
+        PhoneSearchServer("127.0.0.1",{}).use { server ->
+            val path=URI(server.url).path+"/submit"
+            val authority=URI(server.url).rawAuthority
+            assertTrue(request(server,"POST",path,"query=测试","Origin: http://$authority/\r\n").startsWith("HTTP/1.1 200"))
+        }
+    }
+    @Test fun `https origin on another host is still rejected`() {
+        var submitted=false
+        PhoneSearchServer("127.0.0.1",{ submitted=true }).use { server ->
+            val path=URI(server.url).path+"/submit"
+            assertTrue(request(server,"POST",path,"query=test","Origin: https://evil.example:443\r\n").startsWith("HTTP/1.1 403"))
+            assertFalse(submitted)
+        }
+    }
     @Test fun `invalid and oversized input does not consume the session`() {
         PhoneSearchServer("127.0.0.1",{}).use { server ->
             for(body in listOf("query=","query="+"x".repeat(81),"query=a&query=b","query=hello%0Aworld","query=%zz")) {

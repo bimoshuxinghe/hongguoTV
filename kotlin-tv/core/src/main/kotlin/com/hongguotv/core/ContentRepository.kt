@@ -85,9 +85,21 @@ class ContentRepository(val http: OkHttpClient = OkHttpClient.Builder().connectT
     }
     fun home(page: Int = 1, type: ContentType = ContentType.SHORT): CatalogPage {
         require(page in 1..100)
-        if(type==ContentType.COMIC) return comicRanking(page)
+        if(type==ContentType.COMIC) return comicHome(page)
         // 直连新版分类路由，避免旧 tab 参数多一跳 301 重定向
         return parseCategory("$site/category/real-drama",page)
+    }
+
+    /**
+     * 漫剧片库分页：第 1—5 页用官网热播榜（每页 20 部，带榜单名次）。
+     * 官网榜单固定 5 页（100 部，page>5 时官网直接不返回榜单数据），
+     * 之后的页码无缝续接漫剧分类 /category/comic-drama（每页 24 部、
+     * 共 34 页、可深翻页）。第 6 页起按“页码-1”对齐，与榜单末页仅重叠约 4 部。
+     */
+    private fun comicHome(page: Int): CatalogPage {
+        if(page<=5) return comicRanking(page)
+        val category=parseCategory("$site/category/comic-drama",page-1)
+        return CatalogPage(category.items,category.hasMore)
     }
     fun search(keyword: String, page: Int = 1, type: ContentType = ContentType.SHORT): CatalogPage {
         require(keyword.isNotBlank() && keyword.length<=80 && page in 1..100)
@@ -148,12 +160,16 @@ class ContentRepository(val http: OkHttpClient = OkHttpClient.Builder().connectT
         val raw=o.optJSONArray("vid_list") ?: throw IOException("分集暂不可用")
         val episodes=(0 until raw.length()).map { raw.getString(it) }
         if(episodes.isEmpty() || episodes.any { !it.matches(Regex("[0-9]{1,30}")) } || episodes.distinct().size!=episodes.size) throw IOException("分集数据异常")
-        // 相关推荐（同剧其他季）在 SSR mergeLoaderData 脚本里，做容错解析，取不到就返回空列表
-        val related=runCatching { extractRelated(html) }.getOrDefault(emptyList()).filterNot { it.id==id }
-        return Detail(card(o).copy(id=id),episodes,related)
+        val series=card(o).copy(id=id)
+        // 相关推荐：详情页 mergeLoaderData 脚本里的站点推荐做容错解析，取不到就只留同系列各季
+        val siteRelated=runCatching { extractRelated(html) }.getOrDefault(emptyList())
+        // 观看的若是“第 N 季”，用基础名搜索同系列各季（如第五季 → 1—4 季；万妖图录传等长系列）排最前
+        val seasons=runCatching { seasonRelated(series.title,id) }.getOrDefault(emptyList())
+        val related=(seasons+siteRelated).filterNot { it.id==id }.distinctBy { it.id }.take(16)
+        return Detail(series,episodes,related)
     }
 
-    /** 从详情页的 mergeLoaderData 脚本里取 recommendationGroups.related_list（含同剧其他季） */
+    /** 从详情页的 mergeLoaderData 脚本里取站点推荐列表（新版 videoList，旧版 recommendationGroups） */
     private fun extractRelated(html: String): List<Series> {
         var from=0
         while(true) {
@@ -174,10 +190,24 @@ class ContentRepository(val http: OkHttpClient = OkHttpClient.Builder().connectT
             val inner=entries.firstOrNull { it.str("key")=="recommendations" }
                 ?.optJSONArray("routerDataFnArgs") ?: continue
             val payload=inner.optString(0,""); if(payload.isEmpty()) continue
-            val groups=JSONObject(payload).optJSONObject("recommendationGroups") ?: continue
-            val rows=groups.optJSONArray("related_list") ?: continue
+            // 2026-10 改版后推荐直接放在 videoList；旧版 related_list 与 hot_list 依次兜底
+            val json=JSONObject(payload)
+            val groups=json.optJSONObject("recommendationGroups")
+            val rows=json.optJSONArray("videoList")
+                ?: groups?.optJSONArray("related_list")
+                ?: groups?.optJSONArray("hot_list")
+                ?: continue
             return valid(rows.objects().map(::card)).take(16)
         }
+    }
+
+    /** 同剧其他季：当前标题带季数时，用基础名搜索，把同系列各季按季数排好 */
+    private fun seasonRelated(title: String,currentId: String): List<Series> {
+        val base=seasonBaseName(title) ?: return emptyList()
+        return search(base,1,ContentType.SHORT).items
+            .filter { it.id!=currentId && sameFranchise(base,it.title) }
+            .sortedBy { seasonNumber(it.title) ?: 0 }
+            .take(10)
     }
 
     private fun decodeEntities(s: String)=s.replace("&quot;","\"").replace("&#x27;","'").replace("&#39;","'")
@@ -323,5 +353,33 @@ class ContentRepository(val http: OkHttpClient = OkHttpClient.Builder().connectT
             throw IOException("页面数据不完整")
         }
         fun qualityNumber(value: String): Int = Regex("2160|1440|1080|720|576|540|480|360").find(value)?.value?.toInt() ?: mapOf("1920" to 1080,"1280" to 720,"1024" to 576,"854" to 480,"640" to 360)[value] ?: value.toIntOrNull() ?: 0
+
+        /** 去掉标题里的“第 N 季/部”得到基础名：“谁说纨绔不能当状元第五季”→“谁说纨绔不能当状元” */
+        internal fun seasonBaseName(title: String): String? {
+            val match=Regex("""^(.*?)\s*第\s*[0-9０-９一二两三四五六七八九十]+\s*[季部]\s*(.*)$""").find(title.trim()) ?: return null
+            return (match.groupValues[1]+" "+match.groupValues[2]).trim().takeIf { it.isNotEmpty() }
+        }
+
+        /** 标题里的季数：“第一季”=1、“第13季”=13、“第十三季”=13；没有季数返回 null */
+        internal fun seasonNumber(title: String): Int? {
+            val match=Regex("""第\s*([0-9０-９一二两三四五六七八九十]+)\s*[季部]""").find(title) ?: return null
+            val digits=mapOf("一" to 1,"二" to 2,"两" to 2,"三" to 3,"四" to 4,"五" to 5,"六" to 6,"七" to 7,"八" to 8,"九" to 9)
+            val full=match.groupValues[1]
+            val raw=full.map { c -> if(c in '０'..'９') ('0'+(c-'０')) else c }.joinToString("")
+            raw.toIntOrNull()?.let { return it }
+            if(raw=="十") return 10
+            val at=raw.indexOf('十')
+            if(at<0) return digits[raw]
+            val tens=if(at==0) 1 else digits[raw.substring(0,at)] ?: return null
+            val ones=if(at+1==raw.length) 0 else digits[raw.substring(at+1)] ?: return null
+            return tens*10+ones
+        }
+
+        /** 同系列判定：完整等于基础名，或基础名后紧跟“第 N 季/部” */
+        internal fun sameFranchise(base: String,title: String): Boolean {
+            if(!title.startsWith(base)) return false
+            val rest=title.removePrefix(base).trim()
+            return rest.isEmpty() || Regex("""^第\s*[0-9０-９一二两三四五六七八九十]+\s*[季部]""").containsMatchIn(rest)
+        }
     }
 }
