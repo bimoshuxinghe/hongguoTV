@@ -18,14 +18,16 @@ import kotlin.math.abs
  * 字号 / 彩色（单色或渐变）/ 最大行数可在播放中随时调整，立即对后续弹幕生效。
  */
 class DanmakuView(context: Context): FrameLayout(context) {
-    /** 弹幕字号（sp），默认标准 16.5 */
-    var textSizeSp=16.5f
+    /** 弹幕字号（sp），默认标准 20 */
+    var textSizeSp=20f
     /** 彩色弹幕总开关；关闭时全部白色 */
     var colorful=false
     /** 渐变模式：每条弹幕文字沿横向做双色渐变，颜色随文本哈希分布 */
     var gradient=false
     /** 弹幕最大行数（3~8） */
     var maxLanes=5
+    /** 弹幕快慢倍速：0.5 慢速 / 1.0 标准 / 1.5 快速，改后对已在飞的弹幕不生效 */
+    var speed=1.0f
     private val laneHeight=dp(36)
     private val lanes=mutableListOf<Long>() // 每条轨道上一次发射的时刻
     private var laneCount=0
@@ -47,11 +49,12 @@ class DanmakuView(context: Context): FrameLayout(context) {
             lanes.add(0L); laneCount++
         }
         val now=android.os.SystemClock.elapsedRealtime()
+        val rate=speed.coerceIn(0.5f,1.5f)
         // 找一条"上一次发射已超过间隔"的轨道（间隔随轨道号错开，避免同时起飞）
         var lane=-1
         for(i in 0 until laneCount) {
             val last=lanes.elementAt(i)
-            if(now-last>=headwayMs+i*120L) { lane=i; break }
+            if(now-last>=(headwayMs*rate).toLong()+i*120L) { lane=i; break }
         }
         if(lane<0) return
         val size=if(hot) textSizeSp*1.15f else textSizeSp
@@ -81,7 +84,7 @@ class DanmakuView(context: Context): FrameLayout(context) {
         label.translationX=width.toFloat()
         lanes[lane]=now
         val exit=-(textWidth+dp(20)).toFloat()
-        label.animate().translationX(exit).setDuration(travelMs).setInterpolator(LinearInterpolator())
+        label.animate().translationX(exit).setDuration((travelMs/rate).toLong()).setInterpolator(LinearInterpolator())
             .withEndAction { removeView(label) }.start()
     }
 

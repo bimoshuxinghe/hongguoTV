@@ -201,6 +201,31 @@ class ContentRepositoryTest {
         assertFalse(result.hasMore)
     }
 
+    @Test fun detailParsesRelatedSeasonsFromMergeLoaderData() {
+        val recommendations=JSONObject().put("recommendationGroups",JSONObject()
+            .put("related_list",JSONArray()
+                .put(JSONObject().put("series_id","777").put("series_name","禁止闪婚：甜桃烈酒2").put("episode_right_text","全51集"))
+                .put(JSONObject().put("series_id","123").put("series_name","本剧自己").put("episode_right_text","全10集"))))
+        val args=JSONArray().put("detail_page").put(JSONArray().put(
+            JSONObject().put("key","recommendations").put("routerDataFnArgs",JSONArray().put(recommendations.toString()))))
+        val html="""<script>_ROUTER_DATA={"loaderData":{"detail_page":{"seriesDetail":{"series_id":"123","series_name":"本剧","vid_list":["111","222"]}}}};</script>""" +
+            script("mergeLoaderData",args)
+        val repo=repository { html }
+        val detail=repo.detail("123")
+        assertEquals(listOf("111","222"),detail.episodes)
+        assertEquals(listOf("777"),detail.related.map { it.id })
+        assertEquals("禁止闪婚：甜桃烈酒2",detail.related.single().title)
+        assertEquals("全51集",detail.related.single().badge)
+    }
+
+    @Test fun detailWithoutRelatedPayloadStillReturnsEpisodes() {
+        val html="""<script>_ROUTER_DATA={"loaderData":{"detail_page":{"seriesDetail":{"series_id":"123","series_name":"本剧","vid_list":["111"]}}}};</script>"""
+        val repo=repository { html }
+        val detail=repo.detail("123")
+        assertEquals(listOf("111"),detail.episodes)
+        assertTrue(detail.related.isEmpty())
+    }
+
     private fun searchTab(type: Int,id: String) = JSONObject().put("tab_type",type).put("has_more",true)
         .put("data",JSONArray().put(JSONObject().put("video_data",JSONArray().put(JSONObject()
             .put("series_id",id).put("title","测试剧集").put("episode_cnt",8)))))

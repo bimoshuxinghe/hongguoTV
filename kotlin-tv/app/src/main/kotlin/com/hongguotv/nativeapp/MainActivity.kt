@@ -93,7 +93,8 @@ class MainActivity: Activity() {
     private var danmakuFuture: java.util.concurrent.Future<*>?=null
     private var danmakuTickerScheduled=false
     private var danmakuOn=false
-    private var danmakuTextSize=16.5f
+    private var danmakuTextSize=20f
+    private var danmakuSpeed=1.0f
     private var danmakuColorful=false
     private var danmakuGradient=false
     private var danmakuLanes=5
@@ -233,11 +234,15 @@ class MainActivity: Activity() {
         library=Library(this); artwork=ArtworkLoader(this); tvTools=TvTools(this); root=FrameLayout(this).apply { setBackgroundColor(bg) }; setContentView(root)
         getSharedPreferences("hongguotv-player",Context.MODE_PRIVATE).let { prefs ->
             danmakuOn=prefs.getBoolean("danmaku",true)
-            danmakuTextSize=prefs.getFloat("danmaku_text_size",16.5f)
+            danmakuTextSize=prefs.getFloat("danmaku_text_size",20f)
+            danmakuSpeed=prefs.getFloat("danmaku_speed",1.0f)
             danmakuColorful=prefs.getBoolean("danmaku_colorful",false)
             danmakuGradient=prefs.getBoolean("danmaku_gradient",false)
             danmakuLanes=prefs.getInt("danmaku_lanes",5)
         }
+        // 旧版本存的 14/16.5/19/22 归一到新档位
+        if(danmakuTextSize!=18f && danmakuTextSize!=20f && danmakuTextSize!=22f && danmakuTextSize!=24f) danmakuTextSize=20f
+        if(danmakuSpeed!=0.5f && danmakuSpeed!=1.5f) danmakuSpeed=1.0f
         updater=AppUpdater(this) { foreground && library.isLoaded && screen=="catalog" && !tvTools.showing }
         connectivity=getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
         if(Build.VERSION.SDK_INT>=24) runCatching { connectivity.registerDefaultNetworkCallback(networkCallback); networkRegistered=true }
@@ -801,6 +806,8 @@ class MainActivity: Activity() {
         danmakuColor=setting(playback,"彩色弹幕  ·  ${danmakuStyleLabel()}") { showDanmakuStylePicker(danmakuColor,false) }
         lateinit var danmakuRow: TextView
         danmakuRow=setting(playback,"弹幕行数  ·  $danmakuLanes 行") { showDanmakuLanesPicker(danmakuRow,false) }
+        lateinit var danmakuSpeed: TextView
+        danmakuSpeed=setting(playback,"弹幕快慢  ·  ${danmakuSpeedLabel()}") { showDanmakuSpeedPicker(danmakuSpeed,false) }
         lateinit var backup: TextView
         backup=setting(device,"手机备份与恢复") {
             runCatching { LibraryBackup.encode(library.snapshot()) }.onSuccess { encoded ->
@@ -817,7 +824,7 @@ class MainActivity: Activity() {
             library.unhideAll(); hidden.text="恢复隐藏推荐  ·  0 部"; Toast.makeText(this,"热门推荐已恢复",Toast.LENGTH_SHORT).show()
         }
         val about=setting(device,"关于  ·  by：云霄仙子（困困版）") { }
-        val left=listOf(qualityButton,defaultSpeed,frame,autoNextButton,danmakuButton,danmakuSize,danmakuColor,danmakuRow); val right=listOf(backup,hidden,about)
+        val left=listOf(qualityButton,defaultSpeed,frame,autoNextButton,danmakuButton,danmakuSize,danmakuColor,danmakuRow,danmakuSpeed); val right=listOf(backup,hidden,about)
         listOf(left,right).forEach { items -> items.forEachIndexed { index,view ->
             view.nextFocusUpId=items.getOrNull(index-1)?.id ?: nav[tab].id
             view.nextFocusDownId=items.getOrNull(index+1)?.id ?: view.id
@@ -911,6 +918,37 @@ class MainActivity: Activity() {
             content.addView(line,lp(-1,dp(49)))
         }
         episodes.forEachIndexed { i,v -> v.nextFocusLeftId=if(i%10==0) v.id else episodes[i-1].id; v.nextFocusRightId=if(i%10==9 || i==episodes.lastIndex) v.id else episodes[i+1].id; if(i>=10) v.nextFocusUpId=episodes[i-10].id; v.nextFocusDownId=if(i+10<episodes.size) episodes[i+10].id else v.id }
+        // 相关推荐：同剧其他季与相似剧，展示在选集数字下方
+        if(data.related.isNotEmpty()) {
+            content.addView(text("相关推荐",18f).apply { setTypeface(null,Typeface.BOLD); setPadding(0,dp(16),0,dp(3)) })
+            content.addView(text("这部剧的其他季与相似好剧",12f,muted).apply { setPadding(0,0,0,dp(9)) })
+            val relatedCards=mutableListOf<View>()
+            val relScroll=HorizontalScrollView(this).apply { isHorizontalScrollBarEnabled=false; clipToPadding=false }
+            val relRow=row().apply { gravity=Gravity.TOP; setPadding(0,0,dp(4),dp(6)) }
+            val cardWidth=dp(132)
+            data.related.forEach { item ->
+                val card=column(); focusStyle(card); card.setPadding(dp(4),dp(4),dp(4),dp(8)); card.contentDescription=item.title
+                val art=FrameLayout(this)
+                val img=ImageView(this).apply { scaleType=ImageView.ScaleType.FIT_CENTER; importantForAccessibility=View.IMPORTANT_FOR_ACCESSIBILITY_NO }
+                art.addView(img,FrameLayout.LayoutParams(-1,-1)); loadCover(img,item.cover)
+                card.addView(art,lp(-1,(cardWidth/TvStyle.POSTER_ASPECT).toInt()))
+                card.addView(text(item.title,13f).apply { maxLines=2; ellipsize=TextUtils.TruncateAt.END; setPadding(dp(2),dp(6),dp(2),0) },lp(-1,-2).apply { weight=1f })
+                if(item.badge.isNotBlank()) card.addView(text(item.badge,11f,muted).apply { maxLines=1; ellipsize=TextUtils.TruncateAt.END },lp(-1,-2))
+                card.setOnClickListener { openDetail(item) }
+                relRow.addView(card,lp(cardWidth,-2).apply { rightMargin=dp(10) })
+                relatedCards+=card
+            }
+            relScroll.addView(relRow); content.addView(relScroll,lp(-1,-2))
+            // 焦点链：最后一行选集 ↓ 进相关推荐，相关推荐 ↑ 回选集
+            val lastRowStart=(episodes.lastIndex/10)*10
+            val lastRowSize=episodes.size-lastRowStart
+            episodes.forEachIndexed { i,v -> if(i>=lastRowStart) v.nextFocusDownId=relatedCards[minOf(i-lastRowStart,relatedCards.lastIndex)].id }
+            relatedCards.forEachIndexed { i,c ->
+                c.nextFocusLeftId=relatedCards.getOrNull(i-1)?.id ?: c.id
+                c.nextFocusRightId=relatedCards.getOrNull(i+1)?.id ?: c.id
+                c.nextFocusUpId=episodes.getOrNull(lastRowStart+(i%lastRowSize))?.id ?: episodes.last().id
+            }
+        }
         if(focusEpisode) episodes.getOrNull((episodeIndex-group*20).coerceIn(0,episodes.lastIndex))?.requestFocus() else play.requestFocus()
     }
     private fun playEpisode(index: Int,position: Long=0,autoplay: Boolean=true,recovering: Boolean=false) {
@@ -953,7 +991,7 @@ class MainActivity: Activity() {
             playerView=view; root.addView(view,FrameLayout.LayoutParams(-1,-1)); enterAnimation(view)
             danmakuView=DanmakuView(this).also { layer ->
                 layer.visibility=if(danmakuOn) View.VISIBLE else View.GONE
-                layer.textSizeSp=danmakuTextSize; layer.colorful=danmakuColorful; layer.maxLanes=danmakuLanes
+                layer.textSizeSp=danmakuTextSize; layer.colorful=danmakuColorful; layer.maxLanes=danmakuLanes; layer.speed=danmakuSpeed
                 root.addView(layer,FrameLayout.LayoutParams(-1,-1))
             }
             hud=column().apply { setPadding(dp(widthDp()*.05f),dp(20),dp(widthDp()*.05f),(resources.displayMetrics.heightPixels*.05f).toInt()); background=GradientDrawable(GradientDrawable.Orientation.TOP_BOTTOM,intArrayOf(Color.TRANSPARENT,Color.argb(240,11,15,21))) }
@@ -1058,9 +1096,9 @@ class MainActivity: Activity() {
         } else { resetDanmakuState(); danmakuView?.clear() }
         if(anchor!=null && anchor.isAttachedToWindow) anchor.text="弹幕  ·  ${if(danmakuOn) "开启" else "关闭"}"
     }
-    private fun Float.spLabel()=when(this) { 14f -> "小"; 19f -> "大"; 22f -> "特大"; else -> "标准" }
+    private fun Float.spLabel()=when(this) { 18f -> "小"; 22f -> "大"; 24f -> "特大"; else -> "标准" }
     private fun showDanmakuTextSizePicker(anchor: TextView,inPlayer: Boolean) {
-        val options=listOf(14f to "小",16.5f to "标准",19f to "大",22f to "特大")
+        val options=listOf(18f to "小",20f to "标准",22f to "大",24f to "特大")
         val labels=options.map { "${it.second}（${it.first}sp）" }.toTypedArray()
         val selected=options.indexOfFirst { it.first==danmakuTextSize }.coerceAtLeast(0)
         val dialog=AlertDialog.Builder(this).setTitle("弹幕字体大小")
@@ -1105,6 +1143,23 @@ class MainActivity: Activity() {
                 getSharedPreferences("hongguotv-player",Context.MODE_PRIVATE).edit().putInt("danmaku_lanes",danmakuLanes).apply()
                 danmakuView?.maxLanes=danmakuLanes
                 if(anchor.tag!="playback-settings") anchor.text=(if(inPlayer) "弹幕行数 " else "弹幕行数  ·  ")+"$danmakuLanes 行"
+                popup.dismiss()
+            }.setNegativeButton("取消",null).create()
+        dialog.setOnDismissListener { if(anchor.isAttachedToWindow) { anchor.requestFocus(); if(inPlayer) showHud() } }
+        dialog.show(); dialog.listView.setSelection(selected); dialog.listView.requestFocus()
+    }
+    private fun danmakuSpeedLabel()=when(danmakuSpeed) { 0.5f -> "0.5 倍（慢）"; 1.5f -> "1.5 倍（快）"; else -> "1 倍（标准）" }
+    private fun showDanmakuSpeedPicker(anchor: TextView,inPlayer: Boolean) {
+        val options=listOf(0.5f,1.0f,1.5f)
+        val selected=options.indexOf(danmakuSpeed).let { if(it<0) 1 else it }
+        val dialog=AlertDialog.Builder(this).setTitle("弹幕快慢")
+            .setSingleChoiceItems(options.map {
+                when(it) { 0.5f -> "0.5 倍 · 慢速"; 1.5f -> "1.5 倍 · 快速"; else -> "1 倍 · 标准" }
+            }.toTypedArray(),selected) { popup,index ->
+                danmakuSpeed=options[index]
+                getSharedPreferences("hongguotv-player",Context.MODE_PRIVATE).edit().putFloat("danmaku_speed",danmakuSpeed).apply()
+                danmakuView?.speed=danmakuSpeed
+                if(anchor.tag!="playback-settings") anchor.text=(if(inPlayer) "弹幕快慢 " else "弹幕快慢  ·  ")+danmakuSpeedLabel()
                 popup.dismiss()
             }.setNegativeButton("取消",null).create()
         dialog.setOnDismissListener { if(anchor.isAttachedToWindow) { anchor.requestFocus(); if(inPlayer) showHud() } }
@@ -1271,7 +1326,7 @@ class MainActivity: Activity() {
         episodes=addButton(options,"选集") { showEpisodePanel(episodes) }
         lateinit var more: TextView
         more=addButton(options,"播放设置") {
-            tvTools.choose("播放设置",listOf("倍速 ${PlaybackSpeed.label(library.playbackSpeed)}","清晰度 ${library.maxQuality}P","画面 ${library.frameMode.label}","弹幕  ·  ${if(danmakuOn) "开启" else "关闭"}","弹幕字号  ·  ${danmakuTextSize.spLabel()}","彩色弹幕  ·  ${danmakuStyleLabel()}","弹幕行数  ·  $danmakuLanes 行","定时 ${sleepTimer.label()}","从头播放"),more,{ choice ->
+            tvTools.choose("播放设置",listOf("倍速 ${PlaybackSpeed.label(library.playbackSpeed)}","清晰度 ${library.maxQuality}P","画面 ${library.frameMode.label}","弹幕  ·  ${if(danmakuOn) "开启" else "关闭"}","弹幕字号  ·  ${danmakuTextSize.spLabel()}","彩色弹幕  ·  ${danmakuStyleLabel()}","弹幕行数  ·  $danmakuLanes 行","弹幕快慢  ·  ${danmakuSpeedLabel()}","定时 ${sleepTimer.label()}","从头播放"),more,{ choice ->
                 main.post {
                     if(screen=="player" && more.isAttachedToWindow) when(choice) {
                         0 -> showSpeedPicker(more)
@@ -1281,8 +1336,9 @@ class MainActivity: Activity() {
                         4 -> showDanmakuTextSizePicker(more,true)
                         5 -> showDanmakuStylePicker(more,true)
                         6 -> showDanmakuLanesPicker(more,true)
-                        7 -> showSleepPicker(more)
-                        8 -> { seekTo(0); hidePanel() }
+                        7 -> showDanmakuSpeedPicker(more,true)
+                        8 -> showSleepPicker(more)
+                        9 -> { seekTo(0); hidePanel() }
                     }
                 }
             })
@@ -1365,7 +1421,8 @@ class MainActivity: Activity() {
     }
     private fun returnToDetail(forceDetail: Boolean=false) {
         sleepTimer.cancel(); sleepStopped=false; saveProgress(); library.flush(); invalidatePage(); releasePlayer()
-        if(directPlayback && !forceDetail) showCatalog() else { directPlayback=false; showDetail(true) }
+        // 播放中按返回：一律先回到选集详情，再按一次返回才退回片库
+        directPlayback=false; showDetail(true)
     }
     private fun goBack() {
         if(!library.isLoaded) { finish(); return }

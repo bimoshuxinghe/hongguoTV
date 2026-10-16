@@ -17,7 +17,7 @@ data class Series(val id: String, val title: String, val cover: String = "", val
     fun toJson() = JSONObject().put("id",id).put("title",title).put("cover",cover).put("description",description).put("badge",badge).put("tags",tags)
     companion object { fun fromJson(o: JSONObject) = Series(o.str("id"),o.str("title"),o.str("cover"),o.str("description"),o.str("badge"),o.str("tags")) }
 }
-data class Detail(val series: Series, val episodes: List<String>)
+data class Detail(val series: Series, val episodes: List<String>, val related: List<Series> = emptyList())
 data class RankPosition(val rank: Int?, val heat: String)
 data class ComicRanking(val positions: Map<String,RankPosition>, val totalPages: Int, val updatedText: String)
 data class CatalogPage(val items: List<Series>, val hasMore: Boolean, val ranking: ComicRanking? = null)
@@ -142,12 +142,46 @@ class ContentRepository(val http: OkHttpClient = OkHttpClient.Builder().connectT
     }
     fun detail(id: String): Detail {
         require(id.matches(Regex("[0-9]{1,30}")))
-        val o=router("$site/detail?series_id=$id").optJSONObject("detail_page")?.optJSONObject("seriesDetail") ?: throw IOException("剧集详情暂不可用")
+        val html=text("$site/detail?series_id=$id")
+        val loader=extractRouter(html).optJSONObject("loaderData")?.optJSONObject("detail_page") ?: throw IOException("剧集详情暂不可用")
+        val o=loader.optJSONObject("seriesDetail") ?: throw IOException("剧集详情暂不可用")
         val raw=o.optJSONArray("vid_list") ?: throw IOException("分集暂不可用")
         val episodes=(0 until raw.length()).map { raw.getString(it) }
         if(episodes.isEmpty() || episodes.any { !it.matches(Regex("[0-9]{1,30}")) } || episodes.distinct().size!=episodes.size) throw IOException("分集数据异常")
-        return Detail(card(o).copy(id=id),episodes)
+        // 相关推荐（同剧其他季）在 SSR mergeLoaderData 脚本里，做容错解析，取不到就返回空列表
+        val related=runCatching { extractRelated(html) }.getOrDefault(emptyList()).filterNot { it.id==id }
+        return Detail(card(o).copy(id=id),episodes,related)
     }
+
+    /** 从详情页的 mergeLoaderData 脚本里取 recommendationGroups.related_list（含同剧其他季） */
+    private fun extractRelated(html: String): List<Series> {
+        var from=0
+        while(true) {
+            val marker=html.indexOf("mergeLoaderData",from); if(marker<0) return emptyList()
+            val attr=html.indexOf("data-fn-args=\"",marker); if(attr<0) return emptyList()
+            val start=attr+"data-fn-args=\"".length
+            val end=html.indexOf('"',start); if(end<0) return emptyList()
+            from=end
+            val args=JSONArray(decodeEntities(html.substring(start,end)))
+            // 形如 ["detail_page", [{key:"recommendations", routerDataFnArgs:["{json}"]}]]
+            val entries=(0 until args.length()).flatMap { i ->
+                when(val v=args.opt(i)) {
+                    is JSONObject -> listOf(v)
+                    is JSONArray -> (0 until v.length()).mapNotNull { v.optJSONObject(it) }
+                    else -> emptyList()
+                }
+            }
+            val inner=entries.firstOrNull { it.str("key")=="recommendations" }
+                ?.optJSONArray("routerDataFnArgs") ?: continue
+            val payload=inner.optString(0,""); if(payload.isEmpty()) continue
+            val groups=JSONObject(payload).optJSONObject("recommendationGroups") ?: continue
+            val rows=groups.optJSONArray("related_list") ?: continue
+            return valid(rows.objects().map(::card)).take(16)
+        }
+    }
+
+    private fun decodeEntities(s: String)=s.replace("&quot;","\"").replace("&#x27;","'").replace("&#39;","'")
+        .replace("&lt;","<").replace("&gt;",">").replace("&amp;","&")
 
     /**
      * 拉取 video_model。
