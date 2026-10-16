@@ -50,11 +50,13 @@ class DanmakuView(context: Context): FrameLayout(context) {
         }
         val now=android.os.SystemClock.elapsedRealtime()
         val rate=speed.coerceIn(0.5f,1.5f)
+        // 同轨道发射间隔随倍速反向缩放：弹幕飞得越慢，在轨时间越长，间隔要越长才不堆叠
+        val headway=(headwayMs/rate).toLong()
         // 找一条"上一次发射已超过间隔"的轨道（间隔随轨道号错开，避免同时起飞）
         var lane=-1
         for(i in 0 until laneCount) {
             val last=lanes.elementAt(i)
-            if(now-last>=(headwayMs*rate).toLong()+i*120L) { lane=i; break }
+            if(now-last>=headway+i*120L) { lane=i; break }
         }
         if(lane<0) return
         val size=if(hot) textSizeSp*1.15f else textSizeSp
