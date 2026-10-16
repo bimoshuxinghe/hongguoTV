@@ -360,7 +360,10 @@ class MainActivity: Activity() {
     }
     private fun showCatalog(load: Boolean=false,focusNav: Boolean=false,focusType: Boolean=false) {
         initialCatalogPending=false; restoreStoppedPage=false; pendingDetail=null
-        if(tab==1 && genreSlug.isBlank()) { genreSlug=ContentRepository.Genres.items.first().first; genreLabel=ContentRepository.Genres.items.first().second }
+        if(tab==1 && genreSlug.isBlank()) {
+            val (slug,label)=ContentRepository.Genres.items.entries.first().toPair()
+            genreSlug=slug; genreLabel=label
+        }
         // Never cache a new page number with the previous page's results while a request is pending.
         if(load) {
             val cached=if(tab==0 && page==1) library.cachedHome(library.contentType) else null
@@ -681,7 +684,7 @@ class MainActivity: Activity() {
     }
     private fun selectGenre(slug: String) {
         if(slug==genreSlug) return
-        val label=ContentRepository.Genres.items.firstOrNull { it.first==slug }?.second.orEmpty()
+        val label=ContentRepository.Genres.items.entries.firstOrNull { it.key==slug }?.value.orEmpty()
         genreSlug=slug; genreLabel=label
         tabState.remove(1); tabFocus.remove(1)
         page=1; catalogFocus=""; showCatalog(true)
