@@ -62,5 +62,8 @@ jobs:
           TAG: ${{ github.ref_name }}
         run: |
           set -euo pipefail
-          gh release create "$TAG" --title "hongguoTV $TAG" --notes "TV 端安装包（由 Verify Kotlin standalone APK 工作流构建）。debug 为调试签名，release 为发布签名。"
-          gh release upload "$TAG" kotlin-tv/app/build/outputs/apk/debug/*.apk kotlin-tv/app/build/outputs/apk/release/*.apk
+          shopt -s globstar nullglob
+          apks=(**/outputs/apk/*/*.apk)
+          test ${#apks[@]} -gt 0 || { echo "没有找到 APK 产物"; exit 1; }
+          gh release view "$TAG" >/dev/null 2>&1 || gh release create "$TAG" --title "hongguoTV $TAG" --notes "TV 端安装包（由 Verify Kotlin standalone APK 工作流构建）。debug 为调试签名，release 为发布签名。"
+          gh release upload "$TAG" --clobber "${apks[@]}"
