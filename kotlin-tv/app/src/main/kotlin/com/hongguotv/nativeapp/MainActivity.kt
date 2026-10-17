@@ -244,7 +244,8 @@ class MainActivity: Activity() {
         }
         // 旧版本存的 14/16.5/19/22 归一到新档位
         if(danmakuTextSize!=18f && danmakuTextSize!=20f && danmakuTextSize!=22f && danmakuTextSize!=24f) danmakuTextSize=20f
-        if(danmakuSpeed!=0.5f && danmakuSpeed!=1.5f) danmakuSpeed=1.0f
+        // 弹幕速度只支持 0.1~1.0，旧版本的 1.5 快速档自动收敛到标准
+        danmakuSpeed=danmakuSpeed.coerceIn(0.1f,1.0f)
         updater=AppUpdater(this) { foreground && library.isLoaded && screen=="catalog" && !tvTools.showing }
         connectivity=getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
         if(Build.VERSION.SDK_INT>=24) runCatching { connectivity.registerDefaultNetworkCallback(networkCallback); networkRegistered=true }
@@ -1186,14 +1187,21 @@ class MainActivity: Activity() {
         dialog.setOnDismissListener { if(anchor.isAttachedToWindow) { anchor.requestFocus(); if(inPlayer) showHud() } }
         dialog.show(); dialog.listView.setSelection(selected); dialog.listView.requestFocus()
     }
-    private fun danmakuSpeedLabel()=when(danmakuSpeed) { 0.5f -> "0.5 倍（慢）"; 1.5f -> "1.5 倍（快）"; else -> "1 倍（标准）" }
+    /** 弹幕速度展示文案；档位均为 0.1 的整数倍，用十分位整数拼串避免区域小数符差异 */
+    private fun danmakuSpeedText(speed: Float,short: Boolean=false): String {
+        val tenth=Math.round(speed*10)
+        return when {
+            tenth>=10 -> if(short) "1 倍 · 标准" else "1 倍（标准）"
+            tenth<=1 -> if(short) "0.1 倍 · 最慢" else "0.1 倍（最慢）"
+            else -> "${tenth/10}.${tenth%10} 倍"
+        }
+    }
+    private fun danmakuSpeedLabel()=danmakuSpeedText(danmakuSpeed)
     private fun showDanmakuSpeedPicker(anchor: TextView,inPlayer: Boolean) {
-        val options=listOf(0.5f,1.0f,1.5f)
-        val selected=options.indexOf(danmakuSpeed).let { if(it<0) 1 else it }
+        val options=(1..10).map { it/10f }
+        val selected=options.indexOfFirst { kotlin.math.abs(it-danmakuSpeed)<0.05f }.let { if(it<0) 9 else it }
         val dialog=AlertDialog.Builder(this).setTitle("弹幕快慢")
-            .setSingleChoiceItems(options.map {
-                when(it) { 0.5f -> "0.5 倍 · 慢速"; 1.5f -> "1.5 倍 · 快速"; else -> "1 倍 · 标准" }
-            }.toTypedArray(),selected) { popup,index ->
+            .setSingleChoiceItems(options.map { danmakuSpeedText(it,short=true) }.toTypedArray(),selected) { popup,index ->
                 danmakuSpeed=options[index]
                 getSharedPreferences("hongguotv-player",Context.MODE_PRIVATE).edit().putFloat("danmaku_speed",danmakuSpeed).apply()
                 danmakuView?.speed=danmakuSpeed

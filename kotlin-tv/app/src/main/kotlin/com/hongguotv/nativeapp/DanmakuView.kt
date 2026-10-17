@@ -26,7 +26,7 @@ class DanmakuView(context: Context): FrameLayout(context) {
     var gradient=false
     /** 弹幕最大行数（3~8） */
     var maxLanes=5
-    /** 弹幕快慢倍速：0.5 慢速 / 1.0 标准 / 1.5 快速，改后对已在飞的弹幕不生效 */
+    /** 弹幕快慢倍速：0.1（最慢）~ 1.0（标准），改后对已在飞的弹幕不生效 */
     var speed=1.0f
     private val laneHeight=dp(36)
     private val lanes=mutableListOf<Long>() // 每条轨道上一次发射的时刻
@@ -49,7 +49,7 @@ class DanmakuView(context: Context): FrameLayout(context) {
             lanes.add(0L); laneCount++
         }
         val now=android.os.SystemClock.elapsedRealtime()
-        val rate=speed.coerceIn(0.5f,1.5f)
+        val rate=speed.coerceIn(0.1f,1.0f)
         // 同轨道发射间隔随倍速反向缩放：弹幕飞得越慢，在轨时间越长，间隔要越长才不堆叠
         val headway=(headwayMs/rate).toLong()
         // 找一条"上一次发射已超过间隔"的轨道（间隔随轨道号错开，避免同时起飞）
