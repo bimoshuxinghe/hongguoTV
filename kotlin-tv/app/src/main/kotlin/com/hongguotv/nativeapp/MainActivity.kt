@@ -839,7 +839,7 @@ class MainActivity: Activity() {
         val clean=value.trim(); if(clean.isEmpty() || clean.length>80) return
         (searchInput as? EditText)?.let { (getSystemService(Context.INPUT_METHOD_SERVICE) as InputMethodManager).hideSoftInputFromWindow(it.windowToken,0) }
         if(library.contentType!=type) { library.contentType=type; for(index in 0..1) { tabState.remove(index); tabFocus.remove(index) } }
-        library.rememberSearch(clean,type); query=clean; tab=1; page=1; catalogFocus=""; showCatalog(true)
+        library.rememberSearch(clean,type); query=clean; tab=2; page=1; catalogFocus=""; showCatalog(true)
     }
     private fun showSearchHistory(anchor: View) {
         val history=library.searches()

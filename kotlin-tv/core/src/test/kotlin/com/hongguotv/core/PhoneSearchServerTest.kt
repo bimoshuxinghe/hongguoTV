@@ -54,6 +54,30 @@ class PhoneSearchServerTest {
             assertTrue(request(server,"POST",path,"query=测试","Origin: http://$authority/\r\n").startsWith("HTTP/1.1 200"))
         }
     }
+    @Test fun `privacy mode and nonstandard origins still submit`() {
+        // 无痕/隐私模式会发送 Origin: null 或直接省略 Origin，部分内置浏览器注入自定义 scheme，
+        // 这些都无法判定为跨站，不应误报“来源不匹配”；会话安全由一次性 token 保证。
+        val received=CountDownLatch(1)
+        PhoneSearchServer("127.0.0.1",{ received.countDown() }).use { server ->
+            val path=URI(server.url).path+"/submit"
+            assertTrue(request(server,"POST",path,"query=测试","Origin: null\r\n").startsWith("HTTP/1.1 200"))
+        }
+        assertTrue(received.await(2,TimeUnit.SECONDS))
+        PhoneSearchServer("127.0.0.1",{}).use { server ->
+            assertTrue(request(server,"POST",URI(server.url).path+"/submit","query=测试","Origin: app://hongguo\r\n").startsWith("HTTP/1.1 200"))
+        }
+        PhoneSearchServer("127.0.0.1",{}).use { server ->
+            assertTrue(request(server,"POST",URI(server.url).path+"/submit","query=测试","Sec-Fetch-Site: same-origin\r\n").startsWith("HTTP/1.1 200"))
+        }
+    }
+    @Test fun `cross site fetch metadata is rejected even without origin`() {
+        var submitted=false
+        PhoneSearchServer("127.0.0.1",{ submitted=true }).use { server ->
+            val path=URI(server.url).path+"/submit"
+            assertTrue(request(server,"POST",path,"query=test","Sec-Fetch-Site: cross-site\r\n").startsWith("HTTP/1.1 403"))
+            assertFalse(submitted)
+        }
+    }
     @Test fun `https origin on another host is still rejected`() {
         var submitted=false
         PhoneSearchServer("127.0.0.1",{ submitted=true }).use { server ->

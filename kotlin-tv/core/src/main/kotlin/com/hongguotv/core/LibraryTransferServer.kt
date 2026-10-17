@@ -68,8 +68,6 @@ class LibraryTransferServer(address: String,private val backup: String,private v
         }
         if(stopped.get() || System.nanoTime()>=deadline) return respond(socket,410,"二维码已过期")
         if(headers["host"]!=host || request[1] !in listOf("/$token","/$token/download","/$token/import")) return respond(socket,404,"页面不存在")
-        if(!sameSiteOrigin(headers["origin"],host,local.hostAddress,listener.localPort)) return respond(socket,403,"来源不匹配")
-        if(headers["sec-fetch-site"]=="cross-site") return respond(socket,403,"来源不匹配")
         if(request[0]=="GET" && request[1]=="/$token") return respond(socket,200,page())
         if(request[0]=="GET" && request[1]=="/$token/download") {
             if(downloaded) return respond(socket,410,"本次备份已下载，请在电视上重新打开二维码")
@@ -77,6 +75,7 @@ class LibraryTransferServer(address: String,private val backup: String,private v
             downloaded=true; return
         }
         if(request[0]!="POST" || request[1]!="/$token/import") return respond(socket,405,"不支持的操作")
+        if(!sameSiteRequest(headers,host,local.hostAddress,listener.localPort)) return respond(socket,403,"来源不匹配")
         if(headers.containsKey("transfer-encoding") || headers["content-type"]?.substringBefore(';')!="application/json") return respond(socket,400,"请选择 JSON 备份文件")
         val length=headers["content-length"]?.toIntOrNull()?.takeIf { it in 1..LibraryBackup.MAX_BYTES } ?: return respond(socket,413,"备份不能超过 2 MB")
         val bytes=ByteArray(length); var offset=0

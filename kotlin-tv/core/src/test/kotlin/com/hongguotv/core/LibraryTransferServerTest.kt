@@ -38,7 +38,7 @@ class LibraryTransferServerTest {
             assertTrue(request(server,host="evil.example").startsWith("HTTP/1.1 404"))
             assertTrue(request(server,"/wrong").startsWith("HTTP/1.1 404"))
             assertTrue(request(server,"/import",backup,"Origin: http://evil.example\r\n").startsWith("HTTP/1.1 403"))
-            assertTrue(request(server,"/download",headers="Sec-Fetch-Site: cross-site\r\n").startsWith("HTTP/1.1 403"))
+            assertTrue(request(server,"/import",backup,"Sec-Fetch-Site: cross-site\r\n").startsWith("HTTP/1.1 403"))
             assertTrue(request(server,"/import",backup,"Host: other\r\n").startsWith("HTTP/1.1 400"))
             assertTrue(request(server,"/import","{}").startsWith("HTTP/1.1 400"))
             assertTrue(request(server,"/import",backup,"Transfer-Encoding: chunked\r\n").startsWith("HTTP/1.1 400"))
