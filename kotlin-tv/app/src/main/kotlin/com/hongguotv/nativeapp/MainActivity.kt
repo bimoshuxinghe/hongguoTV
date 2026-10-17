@@ -668,7 +668,11 @@ class MainActivity: Activity() {
         if(tab==1) {
             // 分类页：导航向下先到漫剧/短剧切换，向下再进左侧题材列，题材按钮向下/向右进剧集网格
             sideFirst?.let { first -> nav.forEach { it.nextFocusDownId=activeHeadingType()?.id ?: first.id } }
-            sideButtons.forEach { it.nextFocusUpId=activeHeadingType()?.id ?: it.id; it.nextFocusDownId=cards.first().id; it.nextFocusRightId=cards.first().id }
+            sideButtons.forEachIndexed { index,button ->
+                button.nextFocusUpId=if(index==0) activeHeadingType()?.id ?: nav[tab].id else sideButtons[index-1].id
+                button.nextFocusDownId=sideButtons.getOrNull(index+1)?.id ?: cards.first().id
+                button.nextFocusRightId=cards.first().id
+            }
         } else nav.forEach { it.nextFocusDownId=typeButtons[library.contentType]?.id ?: activeHeadingType()?.id ?: rankRefresh?.id ?: favoriteCheck?.id ?: historyManage?.id ?: cards.first().id }
         headingTypes.values.forEach { it.nextFocusDownId=sideFirst?.id ?: cards.first().id }
         rankRefresh?.nextFocusDownId=cards.first().id
