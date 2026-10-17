@@ -20,16 +20,26 @@ class LibraryTransferServerTest {
             socket.getInputStream().readBytes().toString(Charsets.UTF_8)
         }
     }
-    @Test fun `download is one use and validated import is delivered once then listener closes`() {
+    @Test fun `download repeats within session and import is delivered once then listener closes`() {
         val latch=CountDownLatch(1); var received: BackupData?=null
         LibraryTransferServer("127.0.0.1",backup,{ received=it; latch.countDown() }).use { server ->
             assertTrue(request(server).contains("frame-ancestors 'none'"))
             val download=request(server,"/download")
-            assertTrue(download.contains("Content-Disposition: attachment")); assertEquals(backup,download.substringAfter("\r\n\r\n"))
-            assertTrue(request(server,"/download").startsWith("HTTP/1.1 410"))
+            assertTrue(download.contains("Content-Disposition: attachment")); assertTrue(download.contains("application/octet-stream")); assertEquals(backup,download.substringAfter("\r\n\r\n"))
+            // 部分手机浏览器会重复请求下载，会话有效期内应始终可用
+            assertTrue(request(server,"/download").startsWith("HTTP/1.1 200"))
             assertTrue(request(server,"/import",backup).startsWith("HTTP/1.1 200"))
             assertTrue(latch.await(2,TimeUnit.SECONDS)); assertEquals(data,received)
             assertTrue(runCatching { request(server) }.isFailure)
+        }
+    }
+    @Test fun `page embeds html escaped backup and paste path uses same import endpoint`() {
+        val tricky=LibraryBackup.encode(BackupData(listOf(Series("2","<b>剧名 & 测试")),emptyList(),emptySet(),emptyList(),BackupSettings()))
+        LibraryTransferServer("127.0.0.1",tricky,{ fail("must not import") }).use { server ->
+            val page=request(server)
+            assertTrue(page.contains("&lt;b&gt;剧名 &amp; 测试"))
+            assertFalse(page.contains("<b>剧名"))
+            assertTrue(page.contains("id=\"backup\"") && page.contains("id=\"sendPaste\"") && page.contains("id=\"copy\""))
         }
     }
     @Test fun `invalid input cross origin host duplicate headers and oversized bodies do not consume session`() {

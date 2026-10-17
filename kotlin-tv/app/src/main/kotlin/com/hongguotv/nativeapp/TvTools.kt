@@ -130,6 +130,16 @@ class TvTools(private val activity: Activity) {
             } catch(_: Exception) { main.post { if(dialog===next) status.text="无法开启手机输入，请检查网络后重试。" } }
         }
     }
+    /** 恢复前的合并预览与设置选项；手机二维码和 U 盘导入共用 */
+    fun confirmRestore(data: BackupData,anchor: View?,restore: (Boolean)->Unit) {
+        val preview=column()
+        preview.addView(label("备份含 ${data.favorites.size} 部收藏、${data.history.size} 条观看记录、${data.searches.size} 条搜索、${data.later.size} 部稍后看、${data.hidden.size} 部已隐藏推荐。\n\n收藏合并，观看位置以较新的记录为准；已有收藏优先保留（最多 500 部），历史保留最近 200 条。",16f))
+        val settings=CheckBox(activity).apply { text="同时恢复播放设置和内容分类"; isChecked=false }; preview.addView(settings)
+        val confirm=AlertDialog.Builder(activity).setTitle("确认恢复本机记录")
+            .setView(ScrollView(activity).apply { addView(preview) }).setNegativeButton("取消",null)
+            .setPositiveButton("合并恢复") { _,_-> restore(settings.isChecked) }.create()
+        open(confirm,anchor); confirm.getButton(AlertDialog.BUTTON_NEGATIVE).requestFocus()
+    }
     fun libraryTransfer(backup: String,anchor: View?,restore: (BackupData,Boolean)->Unit) {
         val connectivity=activity.getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
         val network=localNetwork(connectivity); val capabilities=connectivity.getNetworkCapabilities(network)
@@ -145,13 +155,7 @@ class TvTools(private val activity: Activity) {
                 val session=LibraryTransferServer(address,backup,{ data -> main.post {
                     if(dialog!==next) return@post
                     next.dismiss()
-                    val preview=column()
-                    preview.addView(label("备份含 ${data.favorites.size} 部收藏、${data.history.size} 条观看记录、${data.searches.size} 条搜索、${data.later.size} 部稍后看、${data.hidden.size} 部已隐藏推荐。\n\n收藏合并，观看位置以较新的记录为准；已有收藏优先保留（最多 500 部），历史保留最近 200 条。",16f))
-                    val settings=CheckBox(activity).apply { text="同时恢复播放设置和内容分类"; isChecked=false }; preview.addView(settings)
-                    val confirm=AlertDialog.Builder(activity).setTitle("确认恢复本机记录")
-                        .setView(ScrollView(activity).apply { addView(preview) }).setNegativeButton("取消",null)
-                        .setPositiveButton("合并恢复") { _,_-> restore(data,settings.isChecked) }.create()
-                    open(confirm,anchor); confirm.getButton(AlertDialog.BUTTON_NEGATIVE).requestFocus()
+                    confirmRestore(data,anchor) { restoreSettings -> restore(data,restoreSettings) }
                 } },{ main.post { if(dialog===next) { content.removeAllViews(); content.addView(label("二维码已过期，请关闭后重新打开。")) } } })
                 main.post {
                     if(dialog!==next) { session.close(); return@post }
@@ -159,7 +163,7 @@ class TvTools(private val activity: Activity) {
                     val row=LinearLayout(activity).apply { gravity=Gravity.CENTER_VERTICAL }
                     row.addView(qr(session.url),LinearLayout.LayoutParams(dp(185),dp(185)))
                     val instructions=column()
-                    instructions.addView(label("手机扫码，用浏览器下载备份或选择备份文件恢复。\n仅限同一局域网；关闭即失效，最长 5 分钟。恢复需在电视确认。",16f))
+                    instructions.addView(label("手机扫码，用浏览器下载备份或选择备份文件恢复；下载失败时可在网页上复制备份文本、或粘贴文本恢复。\n更稳妥的方式：在设置里用 U 盘备份与恢复。\n仅限同一局域网；关闭即失效，最长 5 分钟。恢复需在电视确认。",16f))
                     instructions.addView(label(session.url,12f)); row.addView(instructions,LinearLayout.LayoutParams(0,-2,1f)); content.addView(row)
                 }
             } catch(_: Exception) { main.post { if(dialog===next) status.text="无法开启备份传输，请检查网络后重试。" } }

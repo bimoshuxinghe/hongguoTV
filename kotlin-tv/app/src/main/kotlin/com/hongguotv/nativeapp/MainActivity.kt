@@ -13,9 +13,12 @@ import android.graphics.drawable.GradientDrawable
 import android.view.*
 import android.view.inputmethod.InputMethodManager
 import android.content.Context
+import android.content.ActivityNotFoundException
+import android.content.Intent
 import android.net.ConnectivityManager
 import android.net.Network
 import android.net.NetworkCapabilities
+import android.net.Uri
 import android.widget.*
 import android.text.TextUtils
 import androidx.media3.common.*
@@ -24,6 +27,9 @@ import androidx.media3.exoplayer.DefaultLoadControl
 import androidx.media3.exoplayer.source.ProgressiveMediaSource
 import androidx.media3.ui.PlayerView
 import com.hongguotv.core.*
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 import java.util.concurrent.Executors
 
 @androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class)
@@ -60,6 +66,9 @@ class MainActivity: Activity() {
     private var genreLabel=""
     private var genreType=ContentType.SHORT // 分类页当前内容类型（漫剧/短剧，tab=1 右上角切换）
     private var rankType=ContentType.COMIC  // 排行榜页当前内容类型（tab=3 右上角切换）
+    private val headingTypes=mutableMapOf<ContentType,TextView>() // 分类/排行榜页右上角的漫剧/短剧切换按钮
+    /** 分类/排行榜页右上角当前类型对应的切换按钮 */
+    private fun activeHeadingType(): TextView?=headingTypes[if(tab==1) genreType else rankType]
     private var collectionReturn: CatalogState?=null
     private var collectionFocus=""
     private var collectionBack: View?=null
@@ -299,7 +308,7 @@ class MainActivity: Activity() {
         catalogScroll?.let { scrollPositions[catalogPageKey]=it.scrollY }
         catalogBody=null
         homeScreen=null; selectionPreview=null; catalogScroll=null
-        nav.clear(); typeButtons.clear(); searchInput=null; searchButton=null; searchActions.clear()
+        nav.clear(); typeButtons.clear(); headingTypes.clear(); searchInput=null; searchButton=null; searchActions.clear()
         historyManage=null; rankRefresh=null; rankSubtitle=null; collectionBack=null; favoriteBadges.clear()
         favoriteStatus=null; favoriteCheck=null; homeUpdates=null; resumeCards.clear()
         catalogCards.clear(); cardImages.clear()
@@ -335,7 +344,8 @@ class MainActivity: Activity() {
         leaveCollection()
         tabState[tab]=CatalogState(page,catalog,hasMore,ranking); tabFocus[tab]=catalogFocus
         tab=next; val saved=tabState[next]; page=saved?.page ?: 1; catalog=saved?.items ?: emptyList(); hasMore=saved?.hasMore ?: false; ranking=saved?.ranking; catalogFocus=tabFocus[next].orEmpty()
-        showCatalog(load=(next<=3 && catalog.isEmpty() && (next!=2 || query.isNotBlank())))
+        // 在"分类/排行榜"导航项上按确认：进入页面后先聚焦右上角的漫剧/短剧切换
+        showCatalog(load=(next<=3 && catalog.isEmpty() && (next!=2 || query.isNotBlank())),focusHeading=next==1 || next==3)
     }
     private fun switchContentType(type: ContentType) {
         if(library.contentType==type) return
@@ -348,12 +358,15 @@ class MainActivity: Activity() {
         showCatalog(load=(tab==0 || query.isNotBlank()),focusType=true)
     }
 
-    /** 分类/排行榜页右上角的漫剧/短剧切换按钮（当前类型高亮） */
+    /** 分类/排行榜页右上角的漫剧/短剧切换按钮（当前类型高亮），可聚焦、支持左右切换 */
     private fun catalogTypeButtons(heading: LinearLayout) {
+        headingTypes.clear()
         val active=if(tab==1) genreType else rankType
         ContentType.entries.forEach { type ->
             val item=addButton(heading,type.label,type==active) { switchCatalogType(type) }
             item.textSize=13f; item.minHeight=dp(38); item.setPadding(dp(12),dp(7),dp(12),dp(7))
+            item.nextFocusUpId=nav[tab].id
+            headingTypes[type]=item
         }
     }
 
@@ -369,7 +382,7 @@ class MainActivity: Activity() {
         }
         tabState.remove(tab); tabFocus.remove(tab)
         page=1; catalog=emptyList(); hasMore=false; ranking=null; catalogFocus=""
-        showCatalog(true)
+        showCatalog(true,focusHeading=true)
     }
     private fun leaveCollection() {
         if(collection==null) return
@@ -390,7 +403,7 @@ class MainActivity: Activity() {
         "resume" -> library.history().filterNot { library.watched(it.series.id) }.map { it.series }
         else -> if(tab==4) library.favorites() else library.history().map { it.series }
     }
-    private fun showCatalog(load: Boolean=false,focusNav: Boolean=false,focusType: Boolean=false) {
+    private fun showCatalog(load: Boolean=false,focusNav: Boolean=false,focusType: Boolean=false,focusHeading: Boolean=false) {
         initialCatalogPending=false; restoreStoppedPage=false; pendingDetail=null
         if(tab==1 && genreSlug.isBlank()) {
             val (slug,label)=repository.genres(genreType).entries.first().toPair()
@@ -468,7 +481,7 @@ class MainActivity: Activity() {
             rankSubtitle=text(if(load) "正在读取最新榜单…" else ranking?.updatedText?.ifBlank { rankSource } ?: rankSource,13f,muted)
                 .apply { setPadding(0,0,0,dp(8)) }
             container.addView(rankSubtitle)
-            nav.forEach { it.nextFocusDownId=rankRefresh!!.id }
+            nav.forEach { it.nextFocusDownId=activeHeadingType()?.id ?: rankRefresh!!.id }
         } else if(tab>3) {
             val heading=row().apply { setPadding(0,dp(14),0,dp(6)) }
             heading.addView(text(if(tab==4) "我的收藏" else "接着上次看",25f).apply { setTypeface(null,Typeface.BOLD) },lp(0,-2).apply { weight=1f })
@@ -494,7 +507,7 @@ class MainActivity: Activity() {
         }
         if(load) {
             if(tab==0) catalogGrid(body,focusNav,focusType,loading=true)
-            else { message(body,if(tab==1) "正在加载分类…" else "正在加载…"); if(focusType) typeButtons[library.contentType]?.requestFocus() else nav[tab].requestFocus() }
+            else { message(body,if(tab==1) "正在加载分类…" else "正在加载…"); if(focusHeading) activeHeadingType()?.requestFocus() else if(focusType) typeButtons[library.contentType]?.requestFocus() else nav[tab].requestFocus() }
             val requestTab=tab; val requestPage=page; val requestQuery=query; val requestType=library.contentType
             val requestGenre=genreSlug
             val requestGenreType=genreType
@@ -515,10 +528,10 @@ class MainActivity: Activity() {
                     homeScreen?.refresh?.setOnClickListener { catalog=result.items; hasMore=result.hasMore; ranking=result.ranking; showCatalog() }
                 } else {
                     catalog=result.items; hasMore=result.hasMore; ranking=result.ranking
-                    val keepNav=nav.any { it.hasFocus() }; val keepType=typeButtons.values.any { it.hasFocus() }
+                    val keepNav=nav.any { it.hasFocus() }; val keepType=typeButtons.values.any { it.hasFocus() }; val keepHeading=headingTypes.values.any { it.hasFocus() }
                     val rankSource="来源：红果${rankType.label}热播榜"
                     rankSubtitle?.text=ranking?.updatedText?.ifBlank { rankSource } ?: rankSource
-                    body.removeAllViews(); catalogGrid(body,keepNav || focusNav,keepType || focusType)
+                    body.removeAllViews(); catalogGrid(body,keepNav || focusNav,keepType || focusType,focusHeading=focusHeading || keepHeading)
                 }
             }, { problem ->
                 if(requestTab==0 && requestPage==1) {
@@ -548,9 +561,9 @@ class MainActivity: Activity() {
                     if(resumeCards.isNotEmpty()) resumeCards.first().requestFocus()
                 }
             })
-        } else catalogGrid(body,focusNav,focusType)
+        } else catalogGrid(body,focusNav,focusType,focusHeading=focusHeading)
     }
-    private fun catalogGrid(body: LinearLayout,focusNav: Boolean,focusType: Boolean=false,loading: Boolean=false) {
+    private fun catalogGrid(body: LinearLayout,focusNav: Boolean,focusType: Boolean=false,loading: Boolean=false,focusHeading: Boolean=false) {
         if(tab==0 && page==1 && collection==null) { renderHome(body,focusNav,focusType,loading); return }
         resumeCards.clear(); catalogCards.clear(); cardImages.clear(); collectionBack=null
         // 分类页左右分栏：左侧题材列表，右侧当前题材的剧集网格
@@ -570,7 +583,7 @@ class MainActivity: Activity() {
                 if(sideFirst==null) sideFirst=item
                 sideButtons+=item
             }
-            sideFirst?.let { first -> nav.forEach { it.nextFocusDownId=first.id } }
+            sideFirst?.let { first -> nav.forEach { it.nextFocusDownId=activeHeadingType()?.id ?: first.id } }
             split.addView(sideScroll,lp(dp(148),-1))
             val right=column().apply { setPadding(dp(12),0,0,0) }
             right.addView(text(genreLabel,20f).apply { setTypeface(null,Typeface.BOLD); setPadding(0,dp(6),0,dp(4)) })
@@ -601,7 +614,7 @@ class MainActivity: Activity() {
                 typeButtons.values.forEach { it.nextFocusDownId=resumeCards.first().id }
                 resumeCards.forEach { it.nextFocusDownId=it.id }
             }
-            if(focusType) typeButtons[library.contentType]?.requestFocus() else if(collectionBack!=null && !focusNav) collectionBack?.requestFocus() else if(focusNav || resumeCards.isEmpty()) nav[tab].requestFocus() else resumeCards.first().requestFocus()
+            if(focusHeading) activeHeadingType()?.requestFocus() else if(focusType) typeButtons[library.contentType]?.requestFocus() else if(collectionBack!=null && !focusNav) collectionBack?.requestFocus() else if(focusNav || resumeCards.isEmpty()) nav[tab].requestFocus() else resumeCards.first().requestFocus()
             return
         }
         val cards=mutableListOf<View>()
@@ -649,14 +662,15 @@ class MainActivity: Activity() {
         cards.forEachIndexed { index,card ->
             card.nextFocusLeftId=if(index%count==0) (sideFirst?.id ?: card.id) else cards[index-1].id
             card.nextFocusRightId=if(index%count==count-1 || index==cards.lastIndex) card.id else cards[index+1].id
-            card.nextFocusUpId=if(index<count) (searchInput?.id ?: collectionBack?.id ?: typeButtons[library.contentType]?.id ?: rankRefresh?.id ?: favoriteCheck?.id ?: historyManage?.id ?: resumeCards.getOrNull(minOf(index,2))?.id ?: nav[tab].id) else cards[index-count].id
+            card.nextFocusUpId=if(index<count) (searchInput?.id ?: collectionBack?.id ?: typeButtons[library.contentType]?.id ?: activeHeadingType()?.id ?: rankRefresh?.id ?: favoriteCheck?.id ?: historyManage?.id ?: resumeCards.getOrNull(minOf(index,2))?.id ?: nav[tab].id) else cards[index-count].id
             card.nextFocusDownId=if(index+count<cards.size) cards[index+count].id else if(index/count<cards.lastIndex/count) cards.last().id else next?.takeIf { it.isFocusable }?.id ?: prev?.takeIf { it.isFocusable }?.id ?: card.id
         }
         if(tab==1) {
-            // 分类页：导航向下进左侧题材列，题材按钮向下/向右进剧集网格
-            sideFirst?.let { first -> nav.forEach { it.nextFocusDownId=first.id } }
-            sideButtons.forEach { it.nextFocusDownId=cards.first().id; it.nextFocusRightId=cards.first().id }
-        } else nav.forEach { it.nextFocusDownId=typeButtons[library.contentType]?.id ?: rankRefresh?.id ?: favoriteCheck?.id ?: historyManage?.id ?: cards.first().id }
+            // 分类页：导航向下先到漫剧/短剧切换，向下再进左侧题材列，题材按钮向下/向右进剧集网格
+            sideFirst?.let { first -> nav.forEach { it.nextFocusDownId=activeHeadingType()?.id ?: first.id } }
+            sideButtons.forEach { it.nextFocusUpId=activeHeadingType()?.id ?: it.id; it.nextFocusDownId=cards.first().id; it.nextFocusRightId=cards.first().id }
+        } else nav.forEach { it.nextFocusDownId=typeButtons[library.contentType]?.id ?: activeHeadingType()?.id ?: rankRefresh?.id ?: favoriteCheck?.id ?: historyManage?.id ?: cards.first().id }
+        headingTypes.values.forEach { it.nextFocusDownId=sideFirst?.id ?: cards.first().id }
         rankRefresh?.nextFocusDownId=cards.first().id
         historyManage?.nextFocusDownId=cards.first().id
         favoriteCheck?.nextFocusDownId=cards.first().id
@@ -668,7 +682,7 @@ class MainActivity: Activity() {
         searchInput?.nextFocusDownId=cards.first().id
         searchButton?.nextFocusDownId=cards[minOf(4,cards.lastIndex)].id
         searchActions.forEach { it.nextFocusDownId=cards[minOf(4,cards.lastIndex)].id }
-        if(focusType) typeButtons[library.contentType]?.requestFocus() else if(focusNav) nav[tab].requestFocus()
+        if(focusHeading) activeHeadingType()?.requestFocus() else if(focusType) typeButtons[library.contentType]?.requestFocus() else if(focusNav) nav[tab].requestFocus()
         else if(resumeCards.isNotEmpty() && (catalogFocus.isEmpty() || catalogFocus.startsWith("resume:"))) (resumeCards.firstOrNull { it.tag==catalogFocus } ?: resumeCards.first()).requestFocus()
         else cards[displayed.indexOfFirst { it.id==catalogFocus }.coerceAtLeast(0)].requestFocus()
         val savedScroll=scrollPositions[catalogPageKey]
@@ -850,20 +864,19 @@ class MainActivity: Activity() {
         lateinit var backup: TextView
         backup=setting(device,"手机备份与恢复") {
             runCatching { LibraryBackup.encode(library.snapshot()) }.onSuccess { encoded ->
-                tvTools.libraryTransfer(encoded,backup) { data,restoreSettings ->
-                    favoriteMonitor.stop(); library.restore(data,restoreSettings)
-                    tabState.clear(); tabFocus.clear(); catalogFocus=""; page=1
-                    showCatalog(); favoriteMonitor.check()
-                    Toast.makeText(this,"记录已合并恢复",Toast.LENGTH_LONG).show()
-                }
+                tvTools.libraryTransfer(encoded,backup) { data,restoreSettings -> applyRestore(data,restoreSettings) }
             }.onFailure { tvTools.info("无法生成备份","本机记录暂时无法导出，请重试。",backup) }
         }
+        lateinit var usbBackup: TextView
+        usbBackup=setting(device,"备份到 U 盘") { exportBackup(usbBackup) }
+        lateinit var usbRestore: TextView
+        usbRestore=setting(device,"从 U 盘恢复") { importBackup(usbRestore) }
         lateinit var hidden: TextView
         hidden=setting(device,"恢复隐藏推荐  ·  ${library.hidden().size} 部") {
             library.unhideAll(); hidden.text="恢复隐藏推荐  ·  0 部"; Toast.makeText(this,"热门推荐已恢复",Toast.LENGTH_SHORT).show()
         }
         val about=setting(device,"关于  ·  by：云霄仙子（困困版）") { }
-        val left=listOf(qualityButton,defaultSpeed,frame,autoNextButton,danmakuButton,danmakuSize,danmakuColor,danmakuRow,danmakuSpeed); val right=listOf(backup,hidden,about)
+        val left=listOf(qualityButton,defaultSpeed,frame,autoNextButton,danmakuButton,danmakuSize,danmakuColor,danmakuRow,danmakuSpeed); val right=listOf(backup,usbBackup,usbRestore,hidden,about)
         listOf(left,right).forEach { items -> items.forEachIndexed { index,view ->
             view.nextFocusUpId=items.getOrNull(index-1)?.id ?: nav[tab].id
             view.nextFocusDownId=items.getOrNull(index+1)?.id ?: view.id
@@ -873,6 +886,57 @@ class MainActivity: Activity() {
         nav.forEach { it.nextFocusDownId=qualityButton.id }
         parent.addView(text("红果短剧TV版  /  ${BuildConfig.VERSION_NAME}    ·    收藏与进度保存在本机",12f,muted).apply { setPadding(dp(2),dp(18),0,dp(10)) })
         nav[tab].requestFocus()
+    }
+    /** 应用一份备份：合并入库并刷新页面；手机二维码与 U 盘导入共用 */
+    private fun applyRestore(data: BackupData,restoreSettings: Boolean) {
+        favoriteMonitor.stop(); library.restore(data,restoreSettings)
+        tabState.clear(); tabFocus.clear(); catalogFocus=""; page=1
+        showCatalog(); favoriteMonitor.check()
+        Toast.makeText(this,"记录已合并恢复",Toast.LENGTH_LONG).show()
+    }
+    private val activityResults=mutableMapOf<Int,(Int,Intent?)->Unit>()
+    override fun onActivityResult(requestCode: Int,resultCode: Int,data: Intent?) {
+        super.onActivityResult(requestCode,resultCode,data)
+        activityResults.remove(requestCode)?.invoke(resultCode,data)
+    }
+    /** 用系统文件选择器发起导出/导入（SAF），无需存储权限；设备缺少文件选择器时给出提示 */
+    private fun launchFile(intent: Intent,request: Int,anchor: TextView,done: (Uri)->Unit) {
+        try {
+            activityResults[request]={ code,payload -> if(code==RESULT_OK && payload?.data!=null) done(payload.data!!) }
+            startActivityForResult(intent,request)
+        } catch(_: ActivityNotFoundException) { activityResults.remove(request); tvTools.info("未找到文件管理器","这台设备缺少系统文件选择器，无法访问 U 盘。可改用设置里的手机备份与恢复。",anchor) }
+    }
+    /** 备份到 U 盘：导出一份 JSON 备份文件到用户选择的位置（通常是 U 盘目录） */
+    private fun exportBackup(anchor: TextView) {
+        val encoded=runCatching { LibraryBackup.encode(library.snapshot()) }.getOrElse { tvTools.info("无法生成备份","本机记录暂时无法导出，请重试。",anchor); return }
+        val stamp=SimpleDateFormat("yyyyMMdd-HHmm",Locale.US).format(Date())
+        val intent=Intent(Intent.ACTION_CREATE_DOCUMENT).addCategory(Intent.CATEGORY_OPENABLE)
+            .setType("application/json").putExtra(Intent.EXTRA_TITLE,"hongguotv-backup-$stamp.json")
+        launchFile(intent,7001,anchor) { uri ->
+            io.submit {
+                val ok=runCatching { contentResolver.openOutputStream(uri)?.use { it.write(encoded.toByteArray(Charsets.UTF_8)) } !=null }.getOrDefault(false)
+                main.post { if(!isDestroyed) Toast.makeText(this,if(ok) "备份已保存" else "保存失败，请重试",Toast.LENGTH_LONG).show() }
+            }
+        }
+    }
+    /** 从 U 盘恢复：读取用户选择的备份 JSON，校验后弹确认框合并 */
+    private fun importBackup(anchor: TextView) {
+        val intent=Intent(Intent.ACTION_OPEN_DOCUMENT).addCategory(Intent.CATEGORY_OPENABLE)
+            .setType("*/*").putExtra(Intent.EXTRA_MIME_TYPES,arrayOf("application/json","text/plain","application/octet-stream"))
+        launchFile(intent,7002,anchor) { uri ->
+            io.submit {
+                val data=runCatching {
+                    val bytes=contentResolver.openInputStream(uri)?.use { it.readBytes() } ?: error("无法读取所选文件")
+                    if(bytes.size>LibraryBackup.MAX_BYTES) error("备份不能超过 2 MB")
+                    LibraryBackup.decode(String(bytes,Charsets.UTF_8))
+                }.getOrNull()
+                main.post {
+                    if(isDestroyed) return@post
+                    if(data==null) tvTools.info("无法读取备份","请选择本应用导出的 JSON 备份文件（不超过 2 MB）。",anchor)
+                    else tvTools.confirmRestore(data,anchor) { restoreSettings -> applyRestore(data,restoreSettings) }
+                }
+            }
+        }
     }
     private fun runSearch(value: String,type: ContentType=library.contentType) {
         val clean=value.trim(); if(clean.isEmpty() || clean.length>80) return
