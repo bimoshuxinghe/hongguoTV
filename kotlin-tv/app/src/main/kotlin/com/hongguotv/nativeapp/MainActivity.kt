@@ -382,7 +382,7 @@ class MainActivity: Activity() {
         }
         tabState.remove(tab); tabFocus.remove(tab)
         page=1; catalog=emptyList(); hasMore=false; ranking=null; catalogFocus=""
-        showCatalog(true,focusHeading=true)
+        showCatalog(true,focusHeading=true,focusSide="first")
     }
     private fun leaveCollection() {
         if(collection==null) return
@@ -403,7 +403,7 @@ class MainActivity: Activity() {
         "resume" -> library.history().filterNot { library.watched(it.series.id) }.map { it.series }
         else -> if(tab==4) library.favorites() else library.history().map { it.series }
     }
-    private fun showCatalog(load: Boolean=false,focusNav: Boolean=false,focusType: Boolean=false,focusHeading: Boolean=false) {
+    private fun showCatalog(load: Boolean=false,focusNav: Boolean=false,focusType: Boolean=false,focusHeading: Boolean=false,focusSide: String?=null) {
         initialCatalogPending=false; restoreStoppedPage=false; pendingDetail=null
         if(tab==1 && genreSlug.isBlank()) {
             val (slug,label)=repository.genres(genreType).entries.first().toPair()
@@ -507,7 +507,7 @@ class MainActivity: Activity() {
         }
         if(load) {
             if(tab==0) catalogGrid(body,focusNav,focusType,loading=true)
-            else { message(body,if(tab==1) "正在加载分类…" else "正在加载…"); if(focusHeading) activeHeadingType()?.requestFocus() else if(focusType) typeButtons[library.contentType]?.requestFocus() else nav[tab].requestFocus() }
+            else { message(body,if(tab==1) "正在加载分类…" else "正在加载…"); if(focusHeading || focusSide!=null) (activeHeadingType() ?: nav[tab]).requestFocus() else if(focusType) typeButtons[library.contentType]?.requestFocus() else nav[tab].requestFocus() }
             val requestTab=tab; val requestPage=page; val requestQuery=query; val requestType=library.contentType
             val requestGenre=genreSlug
             val requestGenreType=genreType
@@ -531,7 +531,7 @@ class MainActivity: Activity() {
                     val keepNav=nav.any { it.hasFocus() }; val keepType=typeButtons.values.any { it.hasFocus() }; val keepHeading=headingTypes.values.any { it.hasFocus() }
                     val rankSource="来源：红果${rankType.label}热播榜"
                     rankSubtitle?.text=ranking?.updatedText?.ifBlank { rankSource } ?: rankSource
-                    body.removeAllViews(); catalogGrid(body,keepNav || focusNav,keepType || focusType,focusHeading=focusHeading || keepHeading)
+                    body.removeAllViews(); catalogGrid(body,keepNav || focusNav,keepType || focusType,focusHeading=focusHeading || keepHeading,focusSide=focusSide)
                 }
             }, { problem ->
                 if(requestTab==0 && requestPage==1) {
@@ -561,9 +561,9 @@ class MainActivity: Activity() {
                     if(resumeCards.isNotEmpty()) resumeCards.first().requestFocus()
                 }
             })
-        } else catalogGrid(body,focusNav,focusType,focusHeading=focusHeading)
+        } else catalogGrid(body,focusNav,focusType,focusHeading=focusHeading,focusSide=focusSide)
     }
-    private fun catalogGrid(body: LinearLayout,focusNav: Boolean,focusType: Boolean=false,loading: Boolean=false,focusHeading: Boolean=false) {
+    private fun catalogGrid(body: LinearLayout,focusNav: Boolean,focusType: Boolean=false,loading: Boolean=false,focusHeading: Boolean=false,focusSide: String?=null) {
         if(tab==0 && page==1 && collection==null) { renderHome(body,focusNav,focusType,loading); return }
         resumeCards.clear(); catalogCards.clear(); cardImages.clear(); collectionBack=null
         // 分类页左右分栏：左侧题材列表，右侧当前题材的剧集网格
@@ -578,7 +578,7 @@ class MainActivity: Activity() {
             repository.genres(genreType).forEach { (slug,label) ->
                 val item=addButton(side,label,slug==genreSlug) { selectGenre(slug) }.apply {
                     textSize=13f; minHeight=dp(38); setPadding(dp(12),dp(6),dp(12),dp(6))
-                    maxLines=1; ellipsize=TextUtils.TruncateAt.END
+                    maxLines=1; ellipsize=TextUtils.TruncateAt.END; tag=slug
                 }
                 if(sideFirst==null) sideFirst=item
                 sideButtons+=item
@@ -614,7 +614,10 @@ class MainActivity: Activity() {
                 typeButtons.values.forEach { it.nextFocusDownId=resumeCards.first().id }
                 resumeCards.forEach { it.nextFocusDownId=it.id }
             }
-            if(focusHeading) activeHeadingType()?.requestFocus() else if(focusType) typeButtons[library.contentType]?.requestFocus() else if(collectionBack!=null && !focusNav) collectionBack?.requestFocus() else if(focusNav || resumeCards.isEmpty()) nav[tab].requestFocus() else resumeCards.first().requestFocus()
+            val emptySide=if(tab==1) when(focusSide) { "first" -> sideFirst; null -> null; else -> sideButtons.firstOrNull { it.tag==focusSide } } else null
+            if(emptySide!=null) emptySide.requestFocus()
+            else if(focusHeading) activeHeadingType()?.requestFocus() else if(focusType) typeButtons[library.contentType]?.requestFocus() else if(collectionBack!=null && !focusNav) collectionBack?.requestFocus() else if(focusNav || resumeCards.isEmpty()) nav[tab].requestFocus() else resumeCards.first().requestFocus()
+            if(currentFocus==null || currentFocus===window.decorView) (sideFirst ?: nav[tab]).requestFocus()
             return
         }
         val cards=mutableListOf<View>()
@@ -686,9 +689,12 @@ class MainActivity: Activity() {
         searchInput?.nextFocusDownId=cards.first().id
         searchButton?.nextFocusDownId=cards[minOf(4,cards.lastIndex)].id
         searchActions.forEach { it.nextFocusDownId=cards[minOf(4,cards.lastIndex)].id }
-        if(focusHeading) activeHeadingType()?.requestFocus() else if(focusType) typeButtons[library.contentType]?.requestFocus() else if(focusNav) nav[tab].requestFocus()
+        val sideTarget=if(tab==1) when(focusSide) { "first" -> sideFirst; null -> null; else -> sideButtons.firstOrNull { it.tag==focusSide } } else null
+        if(sideTarget!=null) sideTarget.requestFocus()
+        else if(focusHeading) activeHeadingType()?.requestFocus() else if(focusType) typeButtons[library.contentType]?.requestFocus() else if(focusNav) nav[tab].requestFocus()
         else if(resumeCards.isNotEmpty() && (catalogFocus.isEmpty() || catalogFocus.startsWith("resume:"))) (resumeCards.firstOrNull { it.tag==catalogFocus } ?: resumeCards.first()).requestFocus()
         else cards[displayed.indexOfFirst { it.id==catalogFocus }.coerceAtLeast(0)].requestFocus()
+        if(currentFocus==null || currentFocus===window.decorView) (sideFirst ?: nav[tab]).requestFocus()
         val savedScroll=scrollPositions[catalogPageKey]
         scroll.post {
             if(catalogScroll!==scroll) return@post
@@ -749,7 +755,7 @@ class MainActivity: Activity() {
         val label=repository.genres(genreType)[slug].orEmpty()
         genreSlug=slug; genreLabel=label
         tabState.remove(1); tabFocus.remove(1)
-        page=1; catalogFocus=""; showCatalog(true)
+        page=1; catalogFocus=""; showCatalog(true,focusSide=slug)
     }
     private fun homeShelves(): List<HomeScreen.Shelf> {
         val recent=library.history().filterNot { library.watched(it.series.id) }
