@@ -58,6 +58,8 @@ class MainActivity: Activity() {
     private var collection: String?=null
     private var genreSlug="" // 分类页当前选中题材（tab=1）
     private var genreLabel=""
+    private var genreType=ContentType.SHORT // 分类页当前内容类型（漫剧/短剧，tab=1 右上角切换）
+    private var rankType=ContentType.COMIC  // 排行榜页当前内容类型（tab=3 右上角切换）
     private var collectionReturn: CatalogState?=null
     private var collectionFocus=""
     private var collectionBack: View?=null
@@ -344,6 +346,30 @@ class MainActivity: Activity() {
         page=1; catalog=emptyList(); hasMore=false; ranking=null; catalogFocus=""; homePosition=null
         showCatalog(load=(tab==0 || query.isNotBlank()),focusType=true)
     }
+
+    /** 分类/排行榜页右上角的漫剧/短剧切换按钮（当前类型高亮） */
+    private fun catalogTypeButtons(heading: LinearLayout) {
+        val active=if(tab==1) genreType else rankType
+        ContentType.entries.forEach { type ->
+            val item=addButton(heading,type.label,type==active) { switchCatalogType(type) }
+            item.textSize=13f; item.minHeight=dp(38); item.setPadding(dp(12),dp(7),dp(12),dp(7))
+        }
+    }
+
+    private fun switchCatalogType(type: ContentType) {
+        if(tab==1) {
+            if(genreType==type) return
+            genreType=type
+            val (slug,label)=repository.genres(type).entries.first().toPair()
+            genreSlug=slug; genreLabel=label
+        } else {
+            if(rankType==type) return
+            rankType=type
+        }
+        tabState.remove(tab); tabFocus.remove(tab)
+        page=1; catalog=emptyList(); hasMore=false; ranking=null; catalogFocus=""
+        showCatalog(true)
+    }
     private fun leaveCollection() {
         if(collection==null) return
         collection=null
@@ -366,7 +392,7 @@ class MainActivity: Activity() {
     private fun showCatalog(load: Boolean=false,focusNav: Boolean=false,focusType: Boolean=false) {
         initialCatalogPending=false; restoreStoppedPage=false; pendingDetail=null
         if(tab==1 && genreSlug.isBlank()) {
-            val (slug,label)=ContentRepository.Genres.items.entries.first().toPair()
+            val (slug,label)=repository.genres(genreType).entries.first().toPair()
             genreSlug=slug; genreLabel=label
         }
         // Never cache a new page number with the previous page's results while a request is pending.
@@ -425,12 +451,20 @@ class MainActivity: Activity() {
             searchActions.addAll(listOf(recent,phone))
             typeButtons.values.forEach { it.nextFocusDownId=input.id }
             input.setOnEditorActionListener { _,_,_-> search(); true }; container.addView(searchRow)
+        } else if(tab==1) {
+            // 分类页右上角：漫剧/短剧切换入口
+            val heading=row().apply { setPadding(0,dp(8),0,dp(6)) }
+            heading.addView(text("分类",25f).apply { setTypeface(null,Typeface.BOLD) },lp(0,-2).apply { weight=1f })
+            catalogTypeButtons(heading)
+            container.addView(heading)
         } else if(tab==3) {
             val heading=row().apply { setPadding(0,dp(8),0,dp(6)) }
-            heading.addView(text("漫剧热播榜",25f).apply { setTypeface(null,Typeface.BOLD) },lp(0,-2).apply { weight=1f })
+            heading.addView(text("${rankType.label}热播榜",25f).apply { setTypeface(null,Typeface.BOLD) },lp(0,-2).apply { weight=1f })
+            catalogTypeButtons(heading)
             rankRefresh=addButton(heading,"刷新榜单") { page=1; catalogFocus=""; showCatalog(true) }.apply { nextFocusUpId=nav[tab].id }
             container.addView(heading)
-            rankSubtitle=text(if(load) "正在读取最新榜单…" else ranking?.updatedText?.ifBlank { "来源：红果漫剧热播榜" } ?: "来源：红果漫剧热播榜",13f,muted)
+            val rankSource="来源：红果${rankType.label}热播榜"
+            rankSubtitle=text(if(load) "正在读取最新榜单…" else ranking?.updatedText?.ifBlank { rankSource } ?: rankSource,13f,muted)
                 .apply { setPadding(0,0,0,dp(8)) }
             container.addView(rankSubtitle)
             nav.forEach { it.nextFocusDownId=rankRefresh!!.id }
@@ -462,12 +496,15 @@ class MainActivity: Activity() {
             else { message(body,if(tab==1) "正在加载分类…" else "正在加载…"); if(focusType) typeButtons[library.contentType]?.requestFocus() else nav[tab].requestFocus() }
             val requestTab=tab; val requestPage=page; val requestQuery=query; val requestType=library.contentType
             val requestGenre=genreSlug
+            val requestGenreType=genreType
+            val requestRankType=rankType
             work({
                 val result=when(requestTab) {
                     0 -> repository.home(requestPage,requestType)
-                    1 -> repository.genre(requestGenre,requestPage)
+                    1 -> repository.genre(requestGenre,requestPage,requestGenreType)
                     2 -> repository.search(requestQuery,requestPage,requestType)
-                    else -> repository.comicRanking(requestPage)
+                    3 -> repository.ranking(requestPage,requestRankType)
+                    else -> repository.ranking(requestPage)
                 }
                 result
             }, { result ->
@@ -478,7 +515,8 @@ class MainActivity: Activity() {
                 } else {
                     catalog=result.items; hasMore=result.hasMore; ranking=result.ranking
                     val keepNav=nav.any { it.hasFocus() }; val keepType=typeButtons.values.any { it.hasFocus() }
-                    rankSubtitle?.text=ranking?.updatedText?.ifBlank { "来源：红果漫剧热播榜" } ?: "来源：红果漫剧热播榜"
+                    val rankSource="来源：红果${rankType.label}热播榜"
+                    rankSubtitle?.text=ranking?.updatedText?.ifBlank { rankSource } ?: rankSource
                     body.removeAllViews(); catalogGrid(body,keepNav || focusNav,keepType || focusType)
                 }
             }, { problem ->
@@ -523,7 +561,7 @@ class MainActivity: Activity() {
             val sideScroll=ScrollView(this).apply { isVerticalScrollBarEnabled=false }
             val side=column().apply { setPadding(0,dp(6),dp(8),0) }
             sideScroll.addView(side,lp(dp(140),-2))
-            ContentRepository.Genres.items.forEach { (slug,label) ->
+            repository.genres(genreType).forEach { (slug,label) ->
                 val item=addButton(side,label,slug==genreSlug) { selectGenre(slug) }.apply {
                     textSize=13f; minHeight=dp(38); setPadding(dp(12),dp(6),dp(12),dp(6))
                     maxLines=1; ellipsize=TextUtils.TruncateAt.END
@@ -689,7 +727,7 @@ class MainActivity: Activity() {
     }
     private fun selectGenre(slug: String) {
         if(slug==genreSlug) return
-        val label=ContentRepository.Genres.items.entries.firstOrNull { it.key==slug }?.value.orEmpty()
+        val label=repository.genres(genreType)[slug].orEmpty()
         genreSlug=slug; genreLabel=label
         tabState.remove(1); tabFocus.remove(1)
         page=1; catalogFocus=""; showCatalog(true)

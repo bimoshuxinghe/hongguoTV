@@ -146,6 +146,56 @@ class ContentRepositoryTest {
         assertThrows(IOException::class.java) { repo.home(1,ContentType.COMIC) }
     }
 
+    @Test fun shortRankingUsesRealDramaRankRouteAndParsesRanks() {
+        val payload=rankPayload(2,5)
+        payload.getJSONArray("rankList").getJSONObject(0).put("rank",7).put("heatText","3210万热度")
+        val repo=repository { request ->
+            assertEquals("/rank/hot-real-drama",request.url.encodedPath)
+            assertEquals("2",request.url.queryParameter("page"))
+            script("mergeLoaderData",JSONArray()
+                .put("rank_hot-real-drama/page").put(JSONArray().put(JSONObject().put("key","content")
+                    .put("routerDataFnName","p").put("routerDataFnArgs",JSONArray().put(payload.toString())))))
+        }
+        val result=repo.shortRanking(2)
+        assertNotNull(result.ranking)
+        assertEquals(RankPosition(7,"3210万热度"),result.ranking!!.positions["123"])
+        assertEquals(5,result.ranking.totalPages)
+        assertTrue(result.hasMore)
+    }
+
+    @Test fun rankingDispatchesByContentType() {
+        val paths=mutableListOf<String>()
+        val repo=repository { request ->
+            paths+=request.url.encodedPath
+            script("mergeLoaderData",JSONArray()
+                .put(if(paths.size==1) "rank_hot-real-drama/page" else "rank_hot-comic-drama/page")
+                .put(JSONArray().put(JSONObject().put("key","content")
+                    .put("routerDataFnName","p").put("routerDataFnArgs",JSONArray().put(rankPayload().toString())))))
+        }
+        repo.ranking(1,ContentType.SHORT)
+        repo.ranking(1,ContentType.COMIC)
+        assertEquals(listOf("/rank/hot-real-drama","/rank/hot-comic-drama"),paths)
+    }
+
+    @Test fun comicGenreUsesComicCategoryRoute() {
+        val repo=repository { request ->
+            assertEquals("/category/comic-drama/fantasy",request.url.encodedPath)
+            """<script>_ROUTER_DATA={"loaderData":{"category_page":{"recommendList":[{"series_id":"789","series_name":"分类漫剧"}],"pagination":{"totalPages":2}}}};</script>"""
+        }
+        val result=repo.genre("fantasy",1,ContentType.COMIC)
+        assertEquals("789",result.items.single().id)
+        assertTrue(result.hasMore)
+    }
+
+    @Test fun sameSlugGenreStaysOnRealDramaRouteForShort() {
+        val repo=repository { request ->
+            assertEquals("/category/real-drama/fantasy",request.url.encodedPath)
+            """<script>_ROUTER_DATA={"loaderData":{"category_page":{"recommendList":[{"series_id":"456","series_name":"分类短剧"}],"pagination":{"totalPages":1}}}};</script>"""
+        }
+        assertEquals("456",repo.genre("fantasy",1,ContentType.SHORT).items.single().id)
+        assertThrows(IllegalArgumentException::class.java) { repo.genre("romance",1,ContentType.COMIC) }
+    }
+
     @Test fun renderedComicRankWorksWhenStreamedPayloadIsMissing() {
         val repo=repository {
             """<script>_ROUTER_DATA={"loaderData":{"rank_hot-comic-drama/page":{"rankKey":"comic","pageNum":2}}};</script>

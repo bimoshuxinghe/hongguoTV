@@ -62,6 +62,17 @@ class ContentRepository(val http: OkHttpClient = OkHttpClient.Builder().connectT
         return ComicRank.parse(text("$site/rank/hot-comic-drama?page=$page"),page)
     }
 
+    /** 官网真人短剧热播榜（/rank/hot-real-drama），结构与漫剧榜一致，每页 20 部带名次 */
+    fun shortRanking(page: Int = 1): CatalogPage {
+        require(page in 1..100)
+        return ComicRank.parse(text("$site/rank/hot-real-drama?page=$page"),page,ContentType.SHORT)
+    }
+
+    fun ranking(page: Int = 1, type: ContentType = ContentType.COMIC): CatalogPage = when(type) {
+        ContentType.COMIC -> comicRanking(page)
+        ContentType.SHORT -> shortRanking(page)
+    }
+
     /** 官网题材分类（/category/real-drama/{slug}），实测每页 24 条、深翻页可用 */
     object Genres {
         val items: Map<String,String> = linkedMapOf(
@@ -71,9 +82,23 @@ class ContentRepository(val http: OkHttpClient = OkHttpClient.Builder().connectT
             "supernatural" to "志怪","wonder" to "奇幻","thriller" to "惊悚","horror" to "恐怖","disaster" to "灾难",
             "action-adventure" to "动作冒险","war" to "战争","variety" to "综艺","drama" to "剧情")
     }
-    fun genre(slug: String, page: Int = 1): CatalogPage {
-        require(slug in Genres.items && page in 1..100)
-        return parseCategory("$site/category/real-drama/$slug",page)
+
+    /** 官网漫剧题材分类（/category/comic-drama/{slug}），结构与短剧分类一致 */
+    object ComicGenres {
+        val items: Map<String,String> = linkedMapOf(
+            "fantasy" to "玄幻","wonder" to "奇幻","adventure" to "冒险","apocalypse" to "末世",
+            "sci-fi" to "科幻","wealthy-family" to "豪门","creative" to "脑洞","drama" to "剧情")
+    }
+
+    fun genres(type: ContentType): Map<String,String> = when(type) {
+        ContentType.COMIC -> ComicGenres.items
+        ContentType.SHORT -> Genres.items
+    }
+
+    fun genre(slug: String, page: Int = 1, type: ContentType = ContentType.SHORT): CatalogPage {
+        require(slug in genres(type) && page in 1..100)
+        val prefix=if(type==ContentType.COMIC) "comic-drama" else "real-drama"
+        return parseCategory("$site/category/$prefix/$slug",page)
     }
     private fun parseCategory(url: String, page: Int): CatalogPage {
         val data=router(url+if(page>1) "?page=$page" else "")
