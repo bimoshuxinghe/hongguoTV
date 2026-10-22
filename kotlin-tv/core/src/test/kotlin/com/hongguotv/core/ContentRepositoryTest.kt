@@ -229,7 +229,7 @@ class ContentRepositoryTest {
     @Test fun expiredCursorRequestsFreshSearchInsteadOfDuplicateOffsetPage() {
         var now=0L
         var requests=0
-        val repo=repository(clock={ now }) {
+        val repo=repository(clock={ now }) { request ->
             if(request.url.encodedPath=="/api/search/result") throw IOException("官网搜索接口不可用")
             requests++
             JSONObject().put("code",0).put("search_tabs",JSONArray().put(searchTab(11,"999")

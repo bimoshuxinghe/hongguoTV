@@ -8,7 +8,7 @@ import { join } from 'node:path';
 const requireCjs = createRequire(import.meta.url);
 const shimDir = mkdtempSync(join(tmpdir(), 'hongguo-verify-'));
 let source = readFileSync(new URL('../server/vendor/hongguo.cjs', import.meta.url), 'utf8');
-source += '\nmodule.exports={appSearchPage,routerData,signedAppGet,appSearchParams,APP_SEARCH_API,APP_UA,DEVICE,SITE};';
+source += '\nmodule.exports={appSearchPage,webSearchPage,routerData,signedAppGet,appSearchParams,APP_SEARCH_API,APP_UA,DEVICE,SITE};';
 const shimPath = join(shimDir, 'hongguo-verify.cjs');
 writeFileSync(shimPath, source);
 // hongguo.cjs 依赖宿主注入的全局 axios；此处用内置 fetch 模拟同一接口
@@ -40,21 +40,18 @@ try {
     } catch (e) {
         console.log('A0 探针异常 |', e.message);
     }
-    // A1. 官网搜索路由（Kotlin search() 的 fallback 路径）：短剧站搜索应含漫剧/短剧混合结果
-    const webSearch = async (keyword, page) => {
-        const data = await hg.routerData(`${hg.SITE}/search/${encodeURIComponent(keyword)}?page=${page}`);
-        const ld = data.loaderData || data;
-        // 自适应：官网改版后 loaderData 下的键名可能变化，直接找含 searchList 的 section
-        for (const [key, value] of Object.entries(ld)) {
-            if (value && typeof value === 'object' && Array.isArray(value.searchList)) return value.searchList;
-        }
-        console.log('   搜索路由 loaderData keys:', Object.keys(ld).join(','));
-        return [];
-    };
-    const s1 = await webSearch('修仙', 1);
-    const s2 = await webSearch('修仙', 2);
-    ok('A1 官网搜索第1页有结果', s1.length > 0, `count=${s1.length} 首条="${titleOf(s1[0] || {})}"`);
-    ok('A2 官网搜索第2页非空且不重叠', s2.length > 0 && overlap(s1, s2) <= 2, `count=${s2.length} 重叠=${overlap(s1, s2)}`);
+    // A. 官网免签名搜索接口（2026-10 搜索页改 CSR 后前端实际调用 /api/search/result，server 与 Kotlin 搜索的主路径）
+    const s1 = await hg.webSearchPage('修仙', 1);
+    const s2 = await hg.webSearchPage('修仙', 2);
+    ok('A1 官网搜索接口第1页有结果', s1.list.length > 0, `count=${s1.list.length} 首条="${titleOf(s1.list[0] || {})}"`);
+    ok('A2 官网搜索接口第2页非空且不重叠', s2.list.length > 0 && overlap(s1.list, s2.list) <= 2, `count=${s2.list.length} 重叠=${overlap(s1.list, s2.list)}`);
+    // A3. 旧版 SSR 搜索路径观察项（官网改 CSR 后已失效，仅作回退路径诊断，不判失败）
+    try {
+        await hg.routerData(`${hg.SITE}/search/修仙?page=1`);
+        console.log('PASS | A3 旧版SSR搜索路由恢复（意外但无害，回退路径可用）');
+    } catch {
+        console.log('WARN | A3 旧版SSR搜索路由已失效（官网改 CSR，预期内；主路径为 A 组免签名接口）');
+    }
 
     // B. App 签名搜索诊断：注意 JS 签名实现（docker bridge 侧）与 APK 内 Kotlin Signer 是两套实现，
     //    B 组仅用于观察上游对 JS 签名的态度，不作为 APK 搜索功能是否可用的判据（APK 搜索路径 = Kotlin appSearch + A 组官网 fallback）。
