@@ -212,6 +212,7 @@ class ContentRepositoryTest {
     @Test fun shortSearchCarriesCursorAcrossPages() {
         val requests=mutableListOf<Request>()
         val repo=repository { request ->
+            if(request.url.encodedPath=="/api/search/result") throw IOException("官网搜索接口不可用")
             requests+=request
             assertEquals("11",request.url.queryParameter("tab_type"))
             JSONObject().put("code",0).put("search_tabs",JSONArray().put(searchTab(11,"999")
@@ -229,6 +230,7 @@ class ContentRepositoryTest {
         var now=0L
         var requests=0
         val repo=repository(clock={ now }) {
+            if(request.url.encodedPath=="/api/search/result") throw IOException("官网搜索接口不可用")
             requests++
             JSONObject().put("code",0).put("search_tabs",JSONArray().put(searchTab(11,"999")
                 .put("search_id","session").put("passback","cursor"))).toString()
@@ -344,6 +346,7 @@ class ContentRepositoryTest {
     @Test fun unifiedSearchAlwaysUsesShortTab() {
         var requests=0
         val repo=repository { request ->
+            if(request.url.encodedPath=="/api/search/result") throw IOException("官网搜索接口不可用")
             requests++
             assertEquals("11",request.url.queryParameter("tab_type"))
             assertEquals(if(requests==1) "0" else "20",request.url.queryParameter("offset"))
@@ -355,9 +358,29 @@ class ContentRepositoryTest {
         assertEquals(listOf("111"),repo.search("修仙",2,ContentType.SHORT).items.map { it.id })
     }
 
-    @Test fun emptyShortSearchDoesNotFallBackToWebsite() {
+    @Test fun webSearchUsesSignatureFreeSiteApiFirst() {
+        val repo=repository { request ->
+            assertEquals("/api/search/result",request.url.encodedPath)
+            assertEquals("8662",request.url.queryParameter("aid"))
+            assertEquals("修仙",request.url.queryParameter("query"))
+            assertEquals("1",request.url.queryParameter("page"))
+            JSONObject().put("searchList",JSONArray().put(JSONObject()
+                .put("video_data",JSONObject().put("series_id","456").put("series_title","测试短剧").put("episode_cnt",8))))
+                .put("totalCount","111").put("totalPages",12).put("hasMore",true).toString()
+        }
+        val page=repo.search("修仙",1,ContentType.SHORT)
+        assertEquals(listOf("456"),page.items.map { it.id })
+        assertEquals("全 8 集",page.items.single().badge)
+        assertTrue(page.hasMore)
+    }
+
+    @Test fun emptyWebSearchDoesNotFallBackToSignedApp() {
         var requests=0
-        val repo=repository { requests++; """{"code":0,"search_tabs":[{"tab_type":11,"data":[],"has_more":false}]}""" }
+        val repo=repository { request ->
+            requests++
+            assertEquals("/api/search/result",request.url.encodedPath)
+            """{"searchList":[],"totalCount":"0","totalPages":1,"hasMore":false}"""
+        }
         assertTrue(repo.search("无结果",1,ContentType.SHORT).items.isEmpty())
         assertEquals(1,requests)
     }
@@ -366,21 +389,24 @@ class ContentRepositoryTest {
         val paths=mutableListOf<String>()
         val repo=repository { request ->
             paths+=request.url.encodedPath
-            if(paths.size==1) """{"code":0,"search_tabs":[{"tab_type":19,"data":[]}]}"""
+            if(paths.size==1) throw IOException("官网搜索接口不可用")
+            if(paths.size==2) """{"code":0,"search_tabs":[{"tab_type":19,"data":[]}]}"""
             else """<script>_ROUTER_DATA={"loaderData":{"search_page":{"searchList":[{"series_id":"456","series_name":"测试短剧"}]}}}};</script>"""
         }
         assertEquals("456",repo.search("修仙",1,ContentType.SHORT).items.single().id)
-        assertEquals(2,paths.size)
+        assertEquals("/api/search/result",paths[0])
+        assertEquals("/reading/bookapi/search/tab/v",paths[1])
+        assertTrue(paths[2].startsWith("/search/"))
     }
 
     @Test fun shortSearchKeepsWebsiteFallback() {
         val paths=mutableListOf<String>()
         val repo=repository { request ->
             paths+=request.url.encodedPath
-            if(paths.size==1) throw IOException("offline")
+            if(paths.size<=2) throw IOException("offline")
             """<script>_ROUTER_DATA={"loaderData":{"search_page":{"searchList":[{"series_id":"456","series_name":"测试短剧"}]}}}};</script>"""
         }
         assertEquals("456",repo.search("短剧",1,ContentType.SHORT).items.single().id)
-        assertEquals(2,paths.size)
+        assertEquals(3,paths.size)
     }
 }

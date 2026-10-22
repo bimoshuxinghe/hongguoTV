@@ -46,7 +46,7 @@ export function createServer(provider, token = "") {
       if (url.pathname === "/health")
         return json(200, {
           service: "hongguotv",
-          version: "0.1.0",
+          version: "1.1.1",
           apiVersion: 1,
           upstream: "unverified",
         });

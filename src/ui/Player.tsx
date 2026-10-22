@@ -9,6 +9,8 @@ import {
   Text,
   View,
   useTVEventHandler,
+  Platform,
+  type GestureResponderEvent,
 } from "react-native";
 import Video, { VideoRef } from "react-native-video";
 import { ContentProvider, Detail, Playback, Progress } from "../domain/model";
@@ -16,6 +18,7 @@ import { Button, Notice, palette } from "./components";
 import { seekPosition, tvInsets } from "./tv/layout";
 const clock = (n: number) =>
   `${Math.floor(n / 60)}:${String(Math.floor(n % 60)).padStart(2, "0")}`;
+const isTV = Platform.isTV;
 export function Player({
   detail,
   initialIndex,
@@ -223,6 +226,71 @@ export function Player({
     setPosition(value);
   }
   seekRef.current = seek;
+  // ---- 触屏手势：单击切换控制条，双击两侧快进/退 10 秒，双击中间播放/暂停；TV 保持原行为 ----
+  const tapTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const [flash, setFlash] = useState<{ text: string; side: "left" | "right" } | null>(null);
+  const flashTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const [scrubRatio, setScrubRatio] = useState<number | null>(null);
+  const trackWidth = useRef(0);
+  useEffect(
+    () => () => {
+      if (tapTimer.current) clearTimeout(tapTimer.current);
+      if (flashTimer.current) clearTimeout(flashTimer.current);
+    },
+    []
+  );
+  function showFlash(text: string, side: "left" | "right") {
+    setFlash({ text, side });
+    if (flashTimer.current) clearTimeout(flashTimer.current);
+    flashTimer.current = setTimeout(() => setFlash(null), 650);
+  }
+  function handleTap(event: GestureResponderEvent) {
+    if (isTV) {
+      togglePlayback();
+      return;
+    }
+    const x = event.nativeEvent.locationX ?? width / 2;
+    if (tapTimer.current) {
+      clearTimeout(tapTimer.current);
+      tapTimer.current = null;
+      if (x < width * 0.35) {
+        seek(-10);
+        showFlash("−10 秒", "left");
+      } else if (x > width * 0.65) {
+        seek(10);
+        showFlash("+10 秒", "right");
+      } else togglePlayback();
+      return;
+    }
+    tapTimer.current = setTimeout(() => {
+      tapTimer.current = null;
+      if (controlsVisible && !paused && !panel && !error && source) setControlsVisible(false);
+      else reveal();
+    }, 260);
+  }
+  // ---- 进度条拖动（仅触屏）----
+  function ratioAt(event: GestureResponderEvent) {
+    const x = event.nativeEvent.locationX ?? 0;
+    return Math.min(1, Math.max(0, trackWidth.current ? x / trackWidth.current : 0));
+  }
+  function previewScrub(event: GestureResponderEvent) {
+    if (!duration) return;
+    setScrubRatio(ratioAt(event));
+  }
+  function commitScrub(event: GestureResponderEvent) {
+    setScrubRatio(null);
+    if (!duration || error || !source) return;
+    const value = ratioAt(event) * duration;
+    pendingSeek.current = Date.now();
+    video.current?.seek(value);
+    progress.current.position = value;
+    progress.current.completed = false;
+    setFinished(false);
+    setPosition(value);
+  }
+  const scrubFill = duration
+    ? Math.min(100, ((scrubRatio ?? position / duration) as number) * 100)
+    : 0;
   return (
     <View style={s.screen}>
       {source && !error && (
@@ -294,9 +362,17 @@ export function Player({
           accessibilityLabel={
             paused ? "视频已暂停，按确认继续播放" : "视频播放中，按确认暂停"
           }
-          onPress={togglePlayback}
+          onPress={handleTap}
         />
       </TVFocusGuideView>
+      {flash && (
+        <View
+          pointerEvents="none"
+          style={[s.flashWrap, flash.side === "left" ? s.flashLeft : s.flashRight]}
+        >
+          <Text style={s.flashText}>{flash.text}</Text>
+        </View>
+      )}
       {showControls && (
         <View
           pointerEvents="none"
@@ -334,27 +410,58 @@ export function Player({
               paddingBottom: inset.vertical,
             },
           ]}
-          pointerEvents={panel ? "auto" : "none"}
+          pointerEvents={panel || (!isTV && showControls) ? "auto" : "none"}
         >
-          <View style={s.track}>
-            <View
-              style={[
-                s.fill,
-                {
-                  width: `${
-                    duration ? Math.min(100, (position / duration) * 100) : 0
-                  }%`,
-                },
-              ]}
-            />
+          <View
+            style={[s.trackWrap, !isTV && s.trackWrapTouch]}
+            onLayout={(event) => {
+              trackWidth.current = event.nativeEvent.layout.width;
+            }}
+            onStartShouldSetResponder={() => !isTV && duration > 0}
+            onMoveShouldSetResponder={() => !isTV && duration > 0}
+            onResponderGrant={previewScrub}
+            onResponderMove={previewScrub}
+            onResponderRelease={commitScrub}
+            onResponderTerminate={() => setScrubRatio(null)}
+          >
+            <View style={s.track}>
+              <View style={[s.fill, { width: `${scrubFill}%` }]} />
+            </View>
           </View>
           <View style={s.time}>
             <Text style={s.subtitle}>
-              {clock(position)} / {clock(duration)}
+              {clock(scrubRatio != null && duration ? scrubRatio * duration : position)} /{" "}
+              {clock(duration)}
               {paused ? " · 已暂停" : ""}
             </Text>
             <Text style={s.subtitle}>原比例 · 自动连播</Text>
           </View>
+          {!isTV && !panel ? (
+            <View style={s.touchRow}>
+              <Button
+                label="上一集"
+                disabled={index === 0 || test}
+                onPress={() => switchEpisode(index - 1)}
+              />
+              <Button
+                label={finished ? "重新播放" : paused ? "继续播放" : "暂停"}
+                primary
+                onPress={togglePlayback}
+              />
+              <Button
+                label="下一集"
+                disabled={index === detail.episodes.length - 1 || test}
+                onPress={() => switchEpisode(index + 1)}
+              />
+              <Button
+                label="返回选集"
+                onPress={() => {
+                  save();
+                  onExit();
+                }}
+              />
+            </View>
+          ) : null}
           {panel ? (
             <TVFocusGuideView
               autoFocus
@@ -399,8 +506,9 @@ export function Player({
             </TVFocusGuideView>
           ) : (
             <Text style={s.hint}>
-              确认 播放/暂停　 ·　 左右 快进/退 10 秒，长按连续　 ·　 下键
-              更多操作
+              {isTV
+                ? "确认 播放/暂停　 ·　 左右 快进/退 10 秒，长按连续　 ·　 下键 更多操作"
+                : "轻点 显示/隐藏控制 · 双击两侧 快进/退 10 秒 · 双击中间 播放/暂停"}
             </Text>
           )}
         </View>
@@ -431,6 +539,28 @@ const s = StyleSheet.create({
   },
   track: { height: 3, backgroundColor: palette.border, borderRadius: 3 },
   fill: { height: 3, backgroundColor: palette.accent },
+  trackWrap: { paddingVertical: 2 },
+  trackWrapTouch: { paddingVertical: 12 },
+  touchRow: {
+    flexDirection: "row",
+    flexWrap: "wrap",
+    gap: 10,
+    justifyContent: "center",
+    marginBottom: 12,
+  },
+  flashWrap: { position: "absolute", top: "44%" },
+  flashLeft: { left: "14%" },
+  flashRight: { right: "14%" },
+  flashText: {
+    color: "#ffffff",
+    fontSize: 17,
+    fontWeight: "700",
+    backgroundColor: "#101016D0",
+    paddingHorizontal: 14,
+    paddingVertical: 8,
+    borderRadius: 999,
+    overflow: "hidden",
+  },
   time: {
     flexDirection: "row",
     justifyContent: "space-between",

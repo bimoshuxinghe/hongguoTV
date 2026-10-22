@@ -17,13 +17,16 @@ const context = vm.createContext({
   URL,
   URLSearchParams,
   axios: axios.create({
+    // fetch 适配器：Node>=22 全局 fetch，正确处理代理环境（CONNECT 隧道），直连环境行为一致；
+    // http 适配器在 HTTP_PROXY 环境下对 https 目标使用绝对 URI 转发，部分代理会返回 400。
+    adapter: "fetch",
     maxContentLength: 16 * 1024 * 1024,
     maxBodyLength: 1024 * 1024,
   }),
 });
 vm.runInContext(
   source +
-    "\nthis.api = {categoryPage, categoryData, itemToCard, appSearchPage, routerData, resolveStream, prepareHeader, remoteRange, decryptPartial, streamCache, videoInfoCache, pageCache, appSearchCache};",
+    "\nthis.api = {categoryPage, categoryData, itemToCard, appSearchPage, webSearchPage, routerData, resolveStream, prepareHeader, remoteRange, decryptPartial, streamCache, videoInfoCache, pageCache, appSearchCache};",
   context,
   { timeout: 5000 }
 );
@@ -52,6 +55,13 @@ export const provider = {
     return { items: cards(pageData.recommendList.map(api.itemToCard)), page };
   },
   async search(keyword, page = 1) {
+    // 首选：官网新版免签名搜索 JSON 接口（2026-10 搜索页改 CSR 后前端实际使用的数据源）
+    try {
+      const web = await api.webSearchPage(keyword, page);
+      if (web.list.length) return { items: web.list.map(card), page };
+    } catch {
+      /* Signed-app and legacy fallbacks below remain errors if they fail too. */
+    }
     try {
       const result = await api.appSearchPage(keyword, 11, page, 20);
       if (result.list.length) return { items: cards(result.list), page };

@@ -307,6 +307,28 @@ async function appSearchPage(keyword, tabType, page = 1, limit = 20) {
     appSearchCache.set(cacheKey, { time: Date.now(), value }); return value;
 }
 
+// ---------- 官网新版搜索 API（2026-10 搜索页改 CSR 后前端实际调用的 JSON 接口，免签名） ----------
+// GET /api/search/result?aid=8662&query=...&page=... → { searchList, totalCount, totalPages, hasMore }
+// searchList 条目与旧 SSR searchList 同构（video_data.series_id 等），itemToCard 可直接复用。
+
+async function webSearchPage(keyword, page = 1) {
+    keyword = str(keyword); page = Math.max(1, pageNumber(page));
+    const url = `${SITE}/api/search/result?${new URLSearchParams({ aid: '8662', query: keyword, page: String(page) })}`;
+    const cached = pageCache.get(url);
+    if (cached && Date.now() - cached.time < 180000) return cached.value;
+    const data = jsonBody(await getText(url, { headers: { Accept: 'application/json', Referer: `${SITE}/` } }));
+    const rows = Array.isArray(data?.searchList) ? data.searchList : [];
+    if (!data) throw new Error('搜索接口返回异常');
+    const value = {
+        list: rows.map(itemToCard).filter((item) => item.url && item.title),
+        totalCount: Number(data.totalCount || 0),
+        totalPages: Math.max(1, Number(data.totalPages || 1)),
+        hasMore: Boolean(data.hasMore),
+    };
+    pageCache.set(url, { time: Date.now(), value });
+    return value;
+}
+
 // ---------- 字节系签名算法（实测黑盒，勿改常量/位序） ----------
 
 function md5(value) { return crypto.createHash('md5').update(value).digest('hex').toUpperCase(); }
@@ -870,11 +892,18 @@ var rule = {
         const page = pageNumber(pg);
         const word = str(key);
         if (!word) return setResult([]);
+        // 首选：官网新版免签名搜索 JSON 接口（2026-10 改版后搜索页的 XHR 数据源）
+        try {
+            const web = await webSearchPage(word, page);
+            if (web.list.length) return setResult(web.list);
+        } catch (e) {
+            log('红果果官网搜索API失败回退App搜索: ' + e.message);
+        }
         try {
             const app = await appSearchPage(word, 11, page, 20);
             if (app.list.length) return setResult(app.list);
         } catch (e) {
-            log('红果果App搜索失败回退官网: ' + e.message);
+            log('红果果App搜索失败回退旧版官网路由: ' + e.message);
         }
         try {
             const data = await routerData(`${SITE}/search/${encodeURIComponent(word)}?page=${page}`);

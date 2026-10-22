@@ -128,6 +128,9 @@ class ContentRepository(val http: OkHttpClient = OkHttpClient.Builder().connectT
     }
     fun search(keyword: String, page: Int = 1, type: ContentType = ContentType.SHORT): CatalogPage {
         require(keyword.isNotBlank() && keyword.length<=80 && page in 1..100)
+        // 首选：官网新版免签名搜索 JSON 接口（2026-10 搜索页改 CSR 后前端实际使用的数据源）。
+        // 空结果视为真实无结果，直接返回；接口异常再走签名 App 搜索与旧版 SSR 兜底。
+        try { return webSearch(keyword,page) } catch (_: Exception) { /* 兜底继续 */ }
         // 漫剧 tab 的搜索接口不可用；短剧 tab 的搜索会同时返回短剧与漫剧内容，统一走短剧搜索。
         try { val result=appSearch(keyword,page,ContentType.SHORT); if(result.items.isNotEmpty() || !result.hasMore) return result } catch (e: Exception) { if(e is SearchSessionExpiredException) throw e; /* Website fallback. */ }
         val data=router("$site/search/${Signer.encode(keyword)}?page=$page")
@@ -137,6 +140,16 @@ class ContentRepository(val http: OkHttpClient = OkHttpClient.Builder().connectT
         val rows=section?.optJSONArray("searchList") ?: throw IOException("搜索数据暂不可用")
         val items=valid(rows.objects().map(::card))
         return CatalogPage(items,items.isNotEmpty() && page<100)
+    }
+
+    /** 官网新版搜索接口（/api/search/result，免签名），返回结构同旧 SSR searchList */
+    private fun webSearch(keyword: String, page: Int): CatalogPage {
+        val query="aid=8662&query="+Signer.encode(keyword)+"&page=$page"
+        val data=JSONObject(text("$site/api/search/result?$query"))
+        val rows=data.optJSONArray("searchList") ?: JSONArray()
+        val items=valid(rows.objects().map(::card))
+        val totalPages=data.optInt("totalPages",1)
+        return CatalogPage(items,items.isNotEmpty() && data.optBoolean("hasMore",false) && page<minOf(totalPages,100))
     }
     private fun appSearch(keyword: String, page: Int, type: ContentType): CatalogPage {
         val values=VendorConstants.device.toMutableMap()
