@@ -142,14 +142,31 @@ class ContentRepository(val http: OkHttpClient = OkHttpClient.Builder().connectT
         return CatalogPage(items,items.isNotEmpty() && page<100)
     }
 
-    /** 官网新版搜索接口（/api/search/result，免签名），返回结构同旧 SSR searchList */
+    /** 官网新版搜索接口（/api/search/result，免签名），返回结构同旧 SSR searchList；
+     *  上游偶发不可用时返回 HTTP 200 + code=upstream_unavailable 的假空结果，必须抛错走兜底 */
     private fun webSearch(keyword: String, page: Int): CatalogPage {
         val query="aid=8662&query="+Signer.encode(keyword)+"&page=$page"
         val data=JSONObject(text("$site/api/search/result?$query"))
+        if(data.optString("code")=="upstream_unavailable") throw IOException("搜索接口暂不可用")
         val rows=data.optJSONArray("searchList") ?: JSONArray()
         val items=valid(rows.objects().map(::card))
+        // 首页结果合并剧名联想（联想=剧库精确匹配，新剧即时收录；result 的索引对短词召回不全，
+        // 实测搜"反派拿捏"仅召回第一二季，联想接口能带出刚上线的第三季）
+        val merged=if(page==1) mergeSuggestions(keyword,items) else items
         val totalPages=data.optInt("totalPages",1)
-        return CatalogPage(items,items.isNotEmpty() && data.optBoolean("hasMore",false) && page<minOf(totalPages,100))
+        return CatalogPage(merged,merged.isNotEmpty() && data.optBoolean("hasMore",false) && page<minOf(totalPages,100))
+    }
+
+    /** 剧名联想接口（/api/search/suggestion），仅取 word_type=short_play_name 且带剧集数据的条目，按 id 去重后前置 */
+    private fun mergeSuggestions(keyword: String, items: List<Series>): List<Series> {
+        return try {
+            val data=JSONObject(text("$site/api/search/suggestion?aid=8662&query="+Signer.encode(keyword)))
+            val rows=data.optJSONArray("suggestionList") ?: JSONArray()
+            val seen=items.map{it.id}.toSet()
+            val extra=valid(rows.objects().filter{ it.optString("word_type")=="short_play_name" }.map(::card))
+                .filter{ it.id !in seen }
+            extra+items
+        } catch (_: Exception) { items }
     }
     private fun appSearch(keyword: String, page: Int, type: ContentType): CatalogPage {
         val values=VendorConstants.device.toMutableMap()

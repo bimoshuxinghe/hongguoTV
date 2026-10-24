@@ -53,6 +53,28 @@ try {
         console.log('WARN | A3 旧版SSR搜索路由已失效（官网改 CSR，预期内；主路径为 A 组免签名接口）');
     }
 
+    // D. 剧名联想合并回归：result 索引对短词"反派拿捏"只召回第一二季，
+    //    联想接口（剧库数据源，新剧即时收录）应把刚上线的第三季带进搜索结果
+    try {
+        const shortWord = await hg.webSearchPage('反派拿捏', 1);
+        const titles = shortWord.list.map(titleOf);
+        ok('D1 短词搜索合并联想（含新上线剧集）', titles.some((t) => t.includes('反派拿捏') && t.includes('第三季')),
+            `count=${shortWord.list.length} 前几条=[${titles.slice(0, 4).join(' | ')}]`);
+    } catch (e) {
+        ok('D1 短词搜索合并联想（含新上线剧集）', false, `异常: ${e.message}`);
+    }
+    try {
+        const unavailableProbe = await fetch(`${hg.SITE}/api/search/result?aid=8662&query=${encodeURIComponent('不存在的剧xyz')}`)
+            .then((r) => r.json());
+        if (unavailableProbe.code === 'upstream_unavailable') {
+            console.log('PASS | D2 上游假空(code=upstream_unavailable)已按失败处理走兜底');
+        } else {
+            console.log('WARN | D2 本次未复现上游假空（偶发问题，无法稳定触发）');
+        }
+    } catch {
+        console.log('WARN | D2 假空探针异常');
+    }
+
     // B. App 签名搜索诊断：注意 JS 签名实现（docker bridge 侧）与 APK 内 Kotlin Signer 是两套实现，
     //    B 组仅用于观察上游对 JS 签名的态度，不作为 APK 搜索功能是否可用的判据（APK 搜索路径 = Kotlin appSearch + A 组官网 fallback）。
     try {

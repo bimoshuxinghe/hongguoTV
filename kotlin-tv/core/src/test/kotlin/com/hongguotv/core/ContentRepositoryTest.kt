@@ -360,13 +360,18 @@ class ContentRepositoryTest {
 
     @Test fun webSearchUsesSignatureFreeSiteApiFirst() {
         val repo=repository { request ->
-            assertEquals("/api/search/result",request.url.encodedPath)
-            assertEquals("8662",request.url.queryParameter("aid"))
-            assertEquals("修仙",request.url.queryParameter("query"))
-            assertEquals("1",request.url.queryParameter("page"))
-            JSONObject().put("searchList",JSONArray().put(JSONObject()
-                .put("video_data",JSONObject().put("series_id","456").put("series_title","测试短剧").put("episode_cnt",8))))
-                .put("totalCount","111").put("totalPages",12).put("hasMore",true).toString()
+            when(request.url.encodedPath) {
+                "/api/search/suggestion" -> """{"suggestionList":[]}"""
+                else -> {
+                    assertEquals("/api/search/result",request.url.encodedPath)
+                    assertEquals("8662",request.url.queryParameter("aid"))
+                    assertEquals("修仙",request.url.queryParameter("query"))
+                    assertEquals("1",request.url.queryParameter("page"))
+                    JSONObject().put("searchList",JSONArray().put(JSONObject()
+                        .put("video_data",JSONObject().put("series_id","456").put("series_title","测试短剧").put("episode_cnt",8))))
+                        .put("totalCount","111").put("totalPages",12).put("hasMore",true).toString()
+                }
+            }
         }
         val page=repo.search("修仙",1,ContentType.SHORT)
         assertEquals(listOf("456"),page.items.map { it.id })
@@ -374,15 +379,49 @@ class ContentRepositoryTest {
         assertTrue(page.hasMore)
     }
 
+    @Test fun webSearchMergesTitleSuggestionsForNewSeasons() {
+        // 官网搜索索引对短词召回不全：result 只召回第一二季，联想接口（剧库数据源）能带出刚上线的第三季
+        val repo=repository { request ->
+            when(request.url.encodedPath) {
+                "/api/search/suggestion" -> """{"suggestionList":[
+                    {"name":"反派拿捏！","word_type":"short_play_name","video_data":{"series_id":"100","series_title":"反派拿捏！","episode_cnt":155}},
+                    {"name":"反派拿捏！第三季","word_type":"short_play_name","video_data":{"series_id":"300","series_title":"反派拿捏！第三季","episode_cnt":399}},
+                    {"name":"反派拿捏！第四季","word_type":"common_query"},
+                    {"name":"反派拿捏之孤灯遇暖第三季","word_type":"common_query"}]}"""
+                else -> """{"searchList":[
+                    {"video_data":{"series_id":"100","series_title":"反派拿捏！","episode_cnt":155}},
+                    {"video_data":{"series_id":"200","series_title":"反派拿捏！第二季","episode_cnt":391}}],
+                    "totalCount":"105","totalPages":11,"hasMore":true}"""
+            }
+        }
+        val page=repo.search("反派拿捏",1,ContentType.SHORT)
+        assertEquals(listOf("300","100","200"),page.items.map { it.id })
+        assertTrue(page.hasMore)
+    }
+
+    @Test fun upstreamUnavailableFakeEmptyFallsBackToSignedApp() {
+        // 上游偶发不可用时返回 HTTP 200 + code=upstream_unavailable 的假空，必须走签名搜索兜底而不是直接返回无结果
+        val paths=mutableListOf<String>()
+        val repo=repository { request ->
+            paths+=request.url.encodedPath
+            if(paths.size==1) """{"code":"upstream_unavailable","message":"Search is temporarily unavailable."}"""
+            else JSONObject().put("code",0).put("search_tabs",JSONArray().put(searchTab(11,"888"))).toString()
+        }
+        assertEquals(listOf("888"),repo.search("反派拿捏",1,ContentType.SHORT).items.map { it.id })
+        assertEquals("/reading/bookapi/search/tab/v",paths[1])
+    }
+
     @Test fun emptyWebSearchDoesNotFallBackToSignedApp() {
         var requests=0
         val repo=repository { request ->
             requests++
-            assertEquals("/api/search/result",request.url.encodedPath)
-            """{"searchList":[],"totalCount":"0","totalPages":1,"hasMore":false}"""
+            when(request.url.encodedPath) {
+                "/api/search/suggestion" -> """{"suggestionList":[]}"""
+                else -> """{"searchList":[],"totalCount":"0","totalPages":1,"hasMore":false}"""
+            }
         }
         assertTrue(repo.search("无结果",1,ContentType.SHORT).items.isEmpty())
-        assertEquals(1,requests)
+        assertEquals(2,requests)
     }
 
     @Test fun missingShortTabFallsBackToWebsite() {

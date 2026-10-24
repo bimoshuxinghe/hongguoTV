@@ -310,6 +310,18 @@ async function appSearchPage(keyword, tabType, page = 1, limit = 20) {
 // ---------- 官网新版搜索 API（2026-10 搜索页改 CSR 后前端实际调用的 JSON 接口，免签名） ----------
 // GET /api/search/result?aid=8662&query=...&page=... → { searchList, totalCount, totalPages, hasMore }
 // searchList 条目与旧 SSR searchList 同构（video_data.series_id 等），itemToCard 可直接复用。
+// 注意：上游偶发不可用时返回 HTTP 200 + {"code":"upstream_unavailable"} 的假空结果，必须抛错走兜底。
+
+// 剧名联想接口：数据源为剧库，新剧即时收录；result 的搜索索引对短词召回不全
+// （实测搜"反派拿捏"召回仅含第一二季，联想接口第 2 条即是刚上线的第三季）。
+async function webSearchSuggestions(keyword) {
+    const url = `${SITE}/api/search/suggestion?${new URLSearchParams({ aid: '8662', query: str(keyword) })}`;
+    const data = jsonBody(await getText(url, { headers: { Accept: 'application/json', Referer: `${SITE}/` } }));
+    const rows = Array.isArray(data?.suggestionList) ? data.suggestionList : [];
+    // 仅取真实剧集联想（word_type=short_play_name 且带 video_data.series_id），common_query 为热搜词无剧集数据
+    return rows.filter((row) => row?.word_type === 'short_play_name' && row?.video_data?.series_id)
+        .map(itemToCard).filter((item) => item.url && item.title);
+}
 
 async function webSearchPage(keyword, page = 1) {
     keyword = str(keyword); page = Math.max(1, pageNumber(page));
@@ -318,9 +330,20 @@ async function webSearchPage(keyword, page = 1) {
     if (cached && Date.now() - cached.time < 180000) return cached.value;
     const data = jsonBody(await getText(url, { headers: { Accept: 'application/json', Referer: `${SITE}/` } }));
     const rows = Array.isArray(data?.searchList) ? data.searchList : [];
-    if (!data) throw new Error('搜索接口返回异常');
+    if (!data || data.code === 'upstream_unavailable') throw new Error('搜索接口暂不可用');
+    let list = rows.map(itemToCard).filter((item) => item.url && item.title);
+    // 首页结果合并剧名联想（联想=剧库精确匹配，优先展示，含最新上线剧集），按 series_id 去重
+    if (page === 1) {
+        try {
+            const seen = new Set(list.map((item) => item.url));
+            const extra = (await webSearchSuggestions(keyword)).filter((item) => !seen.has(item.url));
+            list = [...extra, ...list];
+        } catch (e) {
+            log('红果果搜索联想失败忽略: ' + e.message);
+        }
+    }
     const value = {
-        list: rows.map(itemToCard).filter((item) => item.url && item.title),
+        list,
         totalCount: Number(data.totalCount || 0),
         totalPages: Math.max(1, Number(data.totalPages || 1)),
         hasMore: Boolean(data.hasMore),
