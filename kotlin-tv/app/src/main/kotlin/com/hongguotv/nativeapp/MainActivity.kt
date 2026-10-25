@@ -206,6 +206,12 @@ class MainActivity: Activity() {
     private var playError=false
     private var finaleShowing=false
     private var lastSaved=0L
+    // 红果账号双端互通：登录会话由 Library 持久化，播放进度回传 30 秒节流
+    private val account=AccountApi()
+    private var accountEntry: TextView?=null
+    private var lastCloudUpload=0L
+    private var syncingCloud=false
+    private var loginCsrf=""
     private var quality=""
     private val tick=object: Runnable {
         override fun run() {
@@ -272,8 +278,14 @@ class MainActivity: Activity() {
         library.loadAsync(onFailure={ problem ->
             if(!isDestroyed) { libraryLoadError=problem; if(foreground) showLibraryError(problem) }
         }) {
-            if(!isDestroyed && foreground) { showCatalog(load=true); favoriteMonitor.check() }
+            if(!isDestroyed && foreground) { showCatalog(load=true); favoriteMonitor.check(); restoreAccountSession() }
         }
+    }
+    /** 启动时恢复红果账号会话；有会话则拉一次云端播放记录合并进本机。 */
+    private fun restoreAccountSession() {
+        val saved=library.account() ?: return
+        if(account.session==null) account.session=saved
+        if(library.isLoaded) syncCloudHistory(showToast=false)
     }
     private fun enterAnimation(view: View) {
         view.alpha=0f; view.translationY=dp(16).toFloat()
@@ -882,12 +894,15 @@ class MainActivity: Activity() {
         usbBackup=setting(device,"备份到 U 盘") { exportBackup(usbBackup) }
         lateinit var usbRestore: TextView
         usbRestore=setting(device,"从 U 盘恢复") { importBackup(usbRestore) }
+        lateinit var accountButton: TextView
+        accountButton=setting(device,"红果账号  ·  ${accountLabel()}") { showAccountMenu(accountButton) }
         lateinit var hidden: TextView
         hidden=setting(device,"恢复隐藏推荐  ·  ${library.hidden().size} 部") {
             library.unhideAll(); hidden.text="恢复隐藏推荐  ·  0 部"; Toast.makeText(this,"热门推荐已恢复",Toast.LENGTH_SHORT).show()
         }
         val about=setting(device,"关于  ·  by：云霄仙子（困困版）") { }
-        val left=listOf(qualityButton,defaultSpeed,frame,autoNextButton,danmakuButton,danmakuSize,danmakuColor,danmakuRow,danmakuSpeed); val right=listOf(backup,usbBackup,usbRestore,hidden,about)
+        accountEntry=accountButton
+        val left=listOf(qualityButton,defaultSpeed,frame,autoNextButton,danmakuButton,danmakuSize,danmakuColor,danmakuRow,danmakuSpeed); val right=listOf(backup,usbBackup,usbRestore,accountButton,hidden,about)
         listOf(left,right).forEach { items -> items.forEachIndexed { index,view ->
             view.nextFocusUpId=items.getOrNull(index-1)?.id ?: nav[tab].id
             view.nextFocusDownId=items.getOrNull(index+1)?.id ?: view.id
@@ -904,6 +919,143 @@ class MainActivity: Activity() {
         tabState.clear(); tabFocus.clear(); catalogFocus=""; page=1
         showCatalog(); favoriteMonitor.check()
         Toast.makeText(this,"记录已合并恢复",Toast.LENGTH_LONG).show()
+    }
+
+    // ── 红果账号：短信验证码登录 / 云端播放记录同步 / 退出 ──────────
+
+    private fun accountLabel(): String {
+        val session=library.account() ?: return "未登录"
+        return session.name.ifEmpty { if(session.userId.isNotEmpty()) "UID ${session.userId}" else "已登录" }
+    }
+
+    /** 设置页入口：未登录走短信登录；已登录提供手动同步与退出。 */
+    private fun showAccountMenu(anchor: TextView) {
+        if(library.account()==null) {
+            tvTools.digitInput("登录红果账号","输入手机号（11 位，验证码短信将发到该手机）",11,11,anchor) { mobile -> sendLoginCode(mobile,anchor) }
+            return
+        }
+        tvTools.choose("红果账号  ·  ${accountLabel()}",listOf("同步云端播放记录","退出登录"),anchor,onChoice={ choice ->
+            when(choice) {
+                0 -> syncCloudHistory(showToast=true)
+                else -> logoutAccount()
+            }
+        })
+    }
+
+    private fun sendLoginCode(mobile: String,anchor: TextView) {
+        io.submit {
+            val result=runCatching { account.sendCode(mobile) }
+            main.post {
+                if(isDestroyed) return@post
+                result.onSuccess { sent ->
+                    loginCsrf=sent.csrf
+                    Toast.makeText(this,sent.message,Toast.LENGTH_LONG).show()
+                    tvTools.digitInput("输入验证码","验证码已发送到 $mobile，收到短信后输入",4,6,anchor) { code -> submitLogin(mobile,code,anchor) }
+                }.onFailure { tvTools.info("发送验证码失败",it.message ?: "请稍后重试",anchor) }
+            }
+        }
+    }
+
+    private fun submitLogin(mobile: String,code: String,anchor: TextView) {
+        io.submit {
+            val result=runCatching { account.smsLogin(mobile,code,csrf=loginCsrf) }
+            main.post {
+                if(isDestroyed) return@post
+                result.onSuccess { outcome ->
+                    when(outcome) {
+                        is AccountApi.LoginResult.Success -> onLoginSuccess(outcome.session)
+                        is AccountApi.LoginResult.Mfa -> showMfaPrompt(mobile,code,outcome.context,anchor)
+                    }
+                }.onFailure { tvTools.info("登录失败",it.message ?: "请稍后重试",anchor) }
+            }
+        }
+    }
+
+    /** 风控触发上行短信验证：用登录手机号向指定通道号回复短信，期间每 3 秒轮询。 */
+    private fun showMfaPrompt(mobile: String,code: String,context: AccountApi.MfaContext,anchor: TextView) {
+        val alert=AlertDialog.Builder(this)
+            .setTitle("安全验证")
+            .setMessage("该账号触发了风控验证：\n\n请用登录手机号 $mobile 向 ${context.channel} 发送一条任意内容的短信，发送完成后回到电视点「我已发送」。")
+            .setNegativeButton("取消",null)
+            .setPositiveButton("我已发送",null)
+            .create()
+        alert.show()
+        var attempts=0
+        var currentToken=context.mfaToken
+        fun poll() {
+            io.submit {
+                val state=runCatching { account.upsmsVerify(context.copy(mfaToken=currentToken)) }.getOrNull()
+                main.post {
+                    if(isDestroyed || !alert.isShowing) return@post
+                    when(state) {
+                        null -> { attempts++; if(attempts<5) main.postDelayed({ poll() },3000) else { alert.dismiss(); tvTools.info("安全验证失败","暂时无法确认短信验证状态，请稍后重新登录。",anchor) } }
+                        is AccountApi.UpsmsState.Waiting -> { attempts++; if(attempts<20) main.postDelayed({ poll() },3000) else { alert.dismiss(); tvTools.info("安全验证超时","未检测到上行短信，请重新登录重试。",anchor) } }
+                        is AccountApi.UpsmsState.Registered -> { state.mfaToken.takeIf { it.isNotEmpty() }?.let { currentToken=it }; alert.dismiss(); reloginAfterMfa(mobile,code,currentToken,anchor) }
+                    }
+                }
+            }
+        }
+        alert.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener { attempts=0; poll() }
+    }
+
+    private fun reloginAfterMfa(mobile: String,code: String,mfaToken: String,anchor: TextView) {
+        io.submit {
+            val result=runCatching { account.smsLogin(mobile,code,csrf=loginCsrf,mfaToken=mfaToken) }
+            main.post {
+                if(isDestroyed) return@post
+                result.onSuccess { outcome ->
+                    when(outcome) {
+                        is AccountApi.LoginResult.Success -> onLoginSuccess(outcome.session)
+                        is AccountApi.LoginResult.Mfa -> tvTools.info("安全验证未完成","风控仍未通过，请稍后重新登录。",anchor)
+                    }
+                }.onFailure { tvTools.info("登录失败",it.message ?: "请稍后重试",anchor) }
+            }
+        }
+    }
+
+    private fun onLoginSuccess(session: AccountApi.Session) {
+        account.session=session; library.saveAccount(session)
+        accountEntry?.text="红果账号  ·  ${accountLabel()}"
+        Toast.makeText(this,"登录成功：${session.name.ifEmpty { "红果用户" }}",Toast.LENGTH_LONG).show()
+        syncCloudHistory(showToast=true)
+    }
+
+    private fun logoutAccount() {
+        account.session=null; library.saveAccount(null)
+        accountEntry?.text="红果账号  ·  未登录"
+        Toast.makeText(this,"已退出登录；本机记录保留",Toast.LENGTH_SHORT).show()
+    }
+
+    /** 拉取云端播放记录（官方手机 App 同源）并按“较新者胜”合并进本机。 */
+    private fun syncCloudHistory(showToast: Boolean) {
+        if(account.session==null || syncingCloud || !library.isLoaded) return
+        syncingCloud=true
+        io.submit {
+            val result=runCatching {
+                val page=account.watchHistory()
+                var applied=0
+                page.items.forEach { item ->
+                    if(item.seriesId.isEmpty() || item.updatedAtMs<=0) return@forEach
+                    val series=Series(item.seriesId,item.title,item.cover)
+                    val completed=item.durationMs>0 && item.positionMs+1500>=item.durationMs
+                    val progress=WatchProgress(series,item.episodeId,item.episodeIndex,item.positionMs,item.durationMs,completed,item.updatedAtMs)
+                    val local=library.progress(item.seriesId)
+                    if(local==null || local.updatedAt<item.updatedAtMs) { library.save(progress); applied++ }
+                }
+                applied to page.items.size
+            }
+            syncingCloud=false
+            main.post {
+                if(isDestroyed || !foreground) return@post
+                result.onSuccess { (applied,total) ->
+                    if(applied>0 && screen=="catalog") refreshLibraryCards("")
+                    if(showToast || applied>0) Toast.makeText(this,if(applied>0) "已同步云端播放记录（$total 条，$applied 部更新）" else "云端记录已是最新（$total 条）",Toast.LENGTH_SHORT).show()
+                }.onFailure { failure ->
+                    if(showToast) tvTools.info("同步失败",failure.message ?: "请稍后重试",accountEntry)
+                    android.util.Log.w("HongguoTV","云端播放记录同步失败",failure)
+                }
+            }
+        }
     }
     private val activityResults=mutableMapOf<Int,(Int,Intent?)->Unit>()
     override fun onActivityResult(requestCode: Int,resultCode: Int,data: Intent?) {
@@ -1560,7 +1712,20 @@ class MainActivity: Activity() {
     private fun formatTime(millis: Long): String { val seconds=(millis.coerceAtLeast(0)/1000); return "%02d:%02d".format(seconds/60,seconds%60) }
     private fun saveProgress(completed: Boolean=false) {
         val p=player ?: return; val data=detail ?: return; if(!playbackReady || episodeIndex !in data.episodes.indices) return
-        library.save(WatchProgress(data.series,data.episodes[episodeIndex],episodeIndex,p.currentPosition.coerceAtLeast(0),p.duration.coerceAtLeast(0),completed || p.playbackState==Player.STATE_ENDED,System.currentTimeMillis()))
+        val progress=WatchProgress(data.series,data.episodes[episodeIndex],episodeIndex,p.currentPosition.coerceAtLeast(0),p.duration.coerceAtLeast(0),completed || p.playbackState==Player.STATE_ENDED,System.currentTimeMillis())
+        library.save(progress)
+        uploadCloudProgress(progress)
+    }
+    /** 双端互通：播放进度回传红果云端（30 秒节流；看完/退出立即上传），手机官方 App 可见。 */
+    private fun uploadCloudProgress(progress: WatchProgress) {
+        if(account.session==null) return
+        val now=System.currentTimeMillis()
+        if(!progress.completed && now-lastCloudUpload<30_000) return
+        lastCloudUpload=now
+        io.submit {
+            runCatching { account.reportProgress(progress.series.id,progress.episodeId,progress.episodeIndex,if(progress.completed && progress.position<=0) progress.duration else progress.position) }
+                .onFailure { android.util.Log.w("HongguoTV","播放进度回传失败",it) }
+        }
     }
     private fun releasePlayer() {
         cancelRecovery(); cancelPrefetch(); mediaSession.deactivate(); tvTools.close()

@@ -13,6 +13,24 @@ import java.util.concurrent.TimeUnit
 // The backup and native library use the same immutable progress shape.
 typealias WatchProgress = BackupProgress
 
+/** Account session stored in JSON (cookies + x-tt-token are valid for 60 days). */
+private object AccountCodec {
+    fun encode(s: AccountApi.Session) = org.json.JSONObject().apply {
+        put("cookies", s.cookies); put("token", s.token); put("userId", s.userId); put("name", s.name); put("avatar", s.avatar)
+    }.toString()
+    fun decode(raw: String): AccountApi.Session? = runCatching {
+        val o = org.json.JSONObject(raw)
+        AccountApi.Session(o.getString("cookies"), o.getString("token"), o.getString("userId"), o.optString("name"), o.optString("avatar"))
+    }.getOrNull()
+}
+
+private data class Result4(
+    val loaded: LibraryIndex,
+    val cached: Map<ContentType, CatalogPage>,
+    val stamps: Map<ContentType, Long>,
+    val account: AccountApi.Session?,
+)
+
 /** Memory-only UI access; disk reads, JSON serialization and commits run on workers. */
 class Library(context: Context) {
     private companion object {
@@ -29,6 +47,7 @@ class Library(context: Context) {
     private val homeWrites = LatestWriteQueue<String, () -> Any?>("hongguotv-home-write", write = { batch -> commit(homePrefs, batch) },
         failed = { Log.w("HongguoTV", "Home cache commit failed") })
     private var index: LibraryIndex? = null
+    private var accountSession: AccountApi.Session? = null
     private val homes = mutableMapOf<ContentType, CatalogPage>()
     private val homeSavedAt = mutableMapOf<ContentType, Long>()
     private var loading = false
@@ -72,15 +91,16 @@ class Library(context: Context) {
                 if (oldKeys.isNotEmpty() && migration.commit()) {
                     prefs.edit().also { edit -> oldKeys.forEach(edit::remove) }.commit()
                 }
-                Triple(loaded, cached, stamps)
+                val account = (values["account"] as? String).let { raw -> raw?.let { AccountCodec.decode(it) } }
+                Result4(loaded, cached, stamps, account)
             }
             main.post {
                 loading = false
                 if (closed) { readyCallbacks.clear(); errorCallbacks.clear(); return@post }
                 val ready = readyCallbacks.toList(); readyCallbacks.clear()
                 val errors = errorCallbacks.toList(); errorCallbacks.clear()
-                result.onSuccess { (loaded, cached, stamps) ->
-                    index = loaded; homes.putAll(cached); homeSavedAt.putAll(stamps)
+                result.onSuccess { r ->
+                    index = r.loaded; homes.putAll(r.cached); homeSavedAt.putAll(r.stamps); accountSession = r.account
                     ready.forEach { it() }
                 }.onFailure { failure -> errors.forEach { it(failure) } }
             }
@@ -163,6 +183,13 @@ class Library(context: Context) {
         get() = state().settings.frame
         set(value) { if (value != frameMode) { state().settings = state().settings.copy(frame = value); put("frameMode", value.name) } }
     fun snapshot() = state().snapshot()
+    fun account(): AccountApi.Session? = accountSession
+    /** 登录成功写入、退出登录清除；凭据立刻落盘。 */
+    fun saveAccount(session: AccountApi.Session?) {
+        accountSession = session
+        put("account", session?.let(AccountCodec::encode))
+        flush()
+    }
     fun restore(incoming: BackupData, restoreSettings: Boolean) {
         val merged = LibraryBackup.merge(snapshot(), incoming, restoreSettings)
         index = LibraryIndex(merged, state().updates())

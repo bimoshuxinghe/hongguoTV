@@ -96,6 +96,51 @@ class TvTools(private val activity: Activity) {
         }
         buttons.first().requestFocus()
     }
+    /** 数字键盘文本输入（手机号/验证码），遥控器数字键直输；确认时回调完整文本。 */
+    fun digitInput(title: String,hint: String,minDigits: Int,maxDigits: Int,anchor: View?,submit: (String)->Unit) {
+        val content=column(); var digits=""; var replace=true
+        val value=label("—",28f).apply { gravity=Gravity.CENTER }; content.addView(value)
+        val error=label(hint,14f); content.addView(error)
+        fun digit(key: String) { digits=if(replace) key else (digits+key).take(maxDigits); replace=false; value.text=digits; error.text=hint }
+        fun erase() { digits=if(replace) "" else digits.dropLast(1); replace=false; value.text=digits.ifEmpty { "—" } }
+        val buttons=mutableListOf<Button>()
+        listOf(listOf("1","2","3"),listOf("4","5","6"),listOf("7","8","9"),listOf("清空","0","退格")).forEach { keys ->
+            val row=LinearLayout(activity)
+            keys.forEach { key ->
+                val button=Button(activity).apply {
+                    id=View.generateViewId(); text=key; minHeight=dp(42)
+                    backgroundTintList=android.content.res.ColorStateList(arrayOf(intArrayOf(android.R.attr.state_focused),intArrayOf()),intArrayOf(Color.rgb(255,99,76),Color.rgb(31,36,47)))
+                    setOnClickListener { when(key) { "清空"->{ digits="";replace=false;value.text="—" }; "退格"->erase(); else->digit(key) } }
+                }
+                buttons+=button
+                row.addView(button,LinearLayout.LayoutParams(0,-2,1f))
+            }
+            content.addView(row)
+        }
+        val next=AlertDialog.Builder(activity).setTitle(title).setView(ScrollView(activity).apply { addView(content) }).setNegativeButton("取消",null).setPositiveButton("确定",null).create()
+        next.setOnKeyListener { _,key,event ->
+            when {
+                key in KeyEvent.KEYCODE_0..KeyEvent.KEYCODE_9 -> { if(event.action==KeyEvent.ACTION_DOWN) digit((key-KeyEvent.KEYCODE_0).toString()); true }
+                key==KeyEvent.KEYCODE_DEL -> { if(event.action==KeyEvent.ACTION_DOWN) erase(); true }
+                else -> false
+            }
+        }
+        open(next,anchor)
+        val ok=next.getButton(AlertDialog.BUTTON_POSITIVE)
+        val cancel=next.getButton(AlertDialog.BUTTON_NEGATIVE)
+        buttons.forEachIndexed { i,button ->
+            button.nextFocusLeftId=buttons[if(i%3==0) i else i-1].id
+            button.nextFocusRightId=buttons[if(i%3==2) i else i+1].id
+            button.nextFocusUpId=buttons[if(i<3) i else i-3].id
+            button.nextFocusDownId=if(i<9) buttons[i+3].id else ok.id
+        }
+        ok.nextFocusUpId=buttons[10].id; cancel.nextFocusUpId=buttons[9].id
+        ok.setOnClickListener {
+            if(digits.length<minDigits) error.text="至少需要 $minDigits 位数字"
+            else { next.dismiss(); submit(digits) }
+        }
+        buttons.first().requestFocus()
+    }
     private fun qr(url: String)=ImageView(activity).apply {
         val bits=QRCodeWriter().encode(url,BarcodeFormat.QR_CODE,360,360)
         val pixels=IntArray(360*360) { i->if(bits[i%360,i/360]) Color.BLACK else Color.WHITE }
