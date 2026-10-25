@@ -8,13 +8,17 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class QrLoginTest {
-    /** web passport 基础参数：aid=2503（hongguoduanju.com）、web 形态 SDK 标识 */
+    /** web passport 基础参数：aid 必须是红果短剧PC站 513755（官网实抓值）——
+     *  回退到 2503 会让码落到番茄域、同步不到红果记录，是致命回归 */
     @Test fun baseQueryUsesWebPassportParams() {
         val query=QrLogin.baseQuery("https://hongguoduanju.com/")
+        assertEquals("513755",query["aid"])
         assertEquals(QrLogin.AID,query["aid"])
         assertEquals("web",query["account_sdk_source"])
+        assertEquals("2.4.13",query["passport_jssdk_version"])
         assertEquals(QrLogin.SDK_VERSION,query["passport_jssdk_version"])
         assertEquals("normal",query["passport_jssdk_type"])
+        assertEquals("1",query["is_from_ttaccountsdk"])
         assertEquals("https://hongguoduanju.com/",query["next"])
         assertEquals("https://hongguoduanju.com",QrLogin.SITE)
     }
@@ -47,14 +51,16 @@ class QrLoginTest {
         assertTrue(missing.message!!.contains("token"))
     }
 
-    /** 官方 copywriting 写「抖音 APP 扫码」会误导（实测抖音/红果不识别此码）→ 替换为番茄提示 */
-    @Test fun parseQrcodeReplacesDouyinCopywriting() {
+    /** 官方 copywriting（抖音 APP 扫码验证）在 aid=513755 红果域码下即官网原文，保留；
+     *  缺省时兜底红果短剧 App 扫码指引 */
+    @Test fun parseQrcodeKeepsOfficialCopywriting() {
         val pngBase64=java.util.Base64.getEncoder().encodeToString(byteArrayOf(0x89.toByte(),0x50,0x4e,0x47))
-        val qr=QrLogin.parseQrcode(JSONObject()
+        val official=QrLogin.parseQrcode(JSONObject()
             .put("token","t").put("qrcode","data:image/png;base64,$pngBase64")
             .put("copywriting","""{"desc":"请使用[color=red]「抖音 APP」[/]扫码验证"}"""))
-        assertTrue(qr.prompt.contains("番茄小说"))
-        assertTrue(!qr.prompt.contains("抖音 APP"))
+        assertEquals("请使用「抖音 APP」扫码验证",official.prompt)
+        val fallback=QrLogin.parseQrcode(JSONObject().put("token","t").put("qrcode","data:image/png;base64,$pngBase64"))
+        assertTrue(fallback.prompt.contains("红果短剧"))
     }
 
     /** check_qrconnect 状态归一：redirect_url / confirmed 同义、scanned 提示、error_code 过期 */

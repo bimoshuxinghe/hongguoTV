@@ -1,10 +1,17 @@
 // SPDX-License-Identifier: GPL-3.0-only
-// 红果扫码登录：网页版 passport（hongguoduanju.com，aid=2503）的二维码端点。
-// 用户用「番茄小说 / 抖音 / 红果」APP 扫码并在手机上确认即可完成登录，
+// 红果扫码登录：网页版 passport（hongguoduanju.com）的二维码端点。
+// 用户用「红果短剧 / 抖音」APP 扫码并在手机上确认即可完成登录，
 // 全程无 App 签名、无设备注册 —— 是短信链路被账号级风控卡死时的官方等价出路。
-// （实测抖音/红果的扫码器常不识别第三方域二维码，番茄小说 APP 必扫。）
 //
-// 链路（hongguo-sky 同源实证）：
+// **域选择（Playwright 抓官网登录弹窗实证，2026-10-26）**：
+//   官网真实调用为 aid=513755（web_name=红果短剧PC站）、passport_jssdk_version=2.4.13、
+//   is_from_ttaccountsdk=1，码落点 reading.snssdk.com/reading_offline/**novelread**/
+//   page/scan-code.html —— 正是红果短剧 App 的扫码页，与官网弹窗提示
+//   「使用红果短剧App 扫一扫」一致。早前误用 aid=2503（木叶文学网档案）会让码
+//   落到番茄域 ucenter_web/app/sdk-next（outSideAppName=番茄小说），扫出来是
+//   番茄域账号，同步不到红果记录——**绝不能再改回**。a_bogus/msToken 非必需。
+//
+// 链路：
 //   GET /passport/web/get_qrcode/          → {token, qrcode(base64 PNG), expire_time, copywriting}
 //   GET /passport/web/check_qrconnect/?token=…（UI 3 秒轮询）
 //     → data.status: new / scanned / confirmed，confirmed 时附 redirect_url
@@ -122,19 +129,21 @@ class QrLogin {
 
     companion object {
         const val SITE="https://hongguoduanju.com"
-        internal const val AID="2503"
+        /** 红果短剧 PC 站 aid（官网登录弹窗实抓值）：决定二维码落点为红果短剧
+         *  App 扫码页（novelread），扫出来才是红果域账号——2503 是番茄/木叶域，禁用 */
+        internal const val AID="513755"
         /** 红果域 passport（novel.snssdk.com，aid=8662）：web 会话跨域通用，
          *  用它查用户身份即得「红果账号」——UID 是红果域的，与番茄域不同 */
         internal const val APP_INFO_URL="https://novel.snssdk.com/passport/account/info/v2/"
-        internal const val SDK_VERSION="3.0.16"
+        internal const val SDK_VERSION="2.4.13"
         internal const val WEB_UA="Mozilla/5.0 (Linux; Android 12) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36"
         const val POLL_INTERVAL_MS=3000L
         private const val TTL_FALLBACK_MS=240_000L
         private const val MAX_REDIRECT_HOPS=12
 
         internal fun baseQuery(next: String="/"): LinkedHashMap<String,String> = linkedMapOf(
-            "aid" to AID,"language" to "zh","account_sdk_source" to "web",
-            "passport_jssdk_version" to SDK_VERSION,"passport_jssdk_type" to "normal","next" to next)
+            "next" to next,"passport_jssdk_version" to SDK_VERSION,"passport_jssdk_type" to "normal",
+            "is_from_ttaccountsdk" to "1","aid" to AID,"language" to "zh","account_sdk_source" to "web")
 
         /** 红果域 info/v2 的 query（aid=8662） */
         private fun appInfoQuery(): LinkedHashMap<String,String> = linkedMapOf(
@@ -154,11 +163,11 @@ class QrLogin {
                 .getOrElse { throw IOException("二维码图片解码失败") }
             if(png.isEmpty()) throw IOException("二维码图片为空")
             val expire=data.optLong("expire_time",0)
-            // 官方 copywriting 常写「抖音 APP 扫码验证」，实测抖音/红果不识别此码（服务端
-            // 把 qrcode_index_url 标注为 outSideAppName=番茄小说），只有番茄小说 APP 能扫。
+            // aid=513755 出的码与官网弹窗同形态（红果短剧App 扫码页），官方 copywriting
+            // （抖音 APP 扫码验证）即官网提示，保留原样；缺省时兜底红果短剧 App 指引。
             val prompt=cleanCopywriting(data.str("copywriting"))
-            val fallback="请用「番茄小说」APP 扫码并在手机上确认（抖音 / 红果 APP 不识别此码）"
-            return QrCode(token,png, if(prompt.isEmpty() || prompt.contains("抖音")) fallback else prompt,
+            return QrCode(token,png,
+                prompt.ifEmpty { "请用「红果短剧」APP 我的界面右上角「扫一扫」扫码并在手机上确认" },
                 if(expire in 30..3600) expire*1000 else TTL_FALLBACK_MS)
         }
 
