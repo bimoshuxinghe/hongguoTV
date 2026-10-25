@@ -68,6 +68,7 @@ object UpdateFiles {
 
 class AppUpdateRepository : java.io.Closeable {
     private val http = OkHttpClient.Builder().connectTimeout(10, TimeUnit.SECONDS).readTimeout(20, TimeUnit.SECONDS)
+        .dns(Ipv4FirstDns)
         .callTimeout(5, TimeUnit.MINUTES).addNetworkInterceptor { chain ->
             val url = chain.request().url
             // Follow GitHub's CDN redirects, never cleartext or arbitrary manifest-provided hosts.

@@ -204,6 +204,7 @@ class MainActivity: Activity() {
     private var speedDialog: AlertDialog?=null
     private var pendingSeek: Long?=null
     private var playError=false
+    private var finaleShowing=false
     private var lastSaved=0L
     private var quality=""
     private val tick=object: Runnable {
@@ -1091,7 +1092,7 @@ class MainActivity: Activity() {
         autoRecovery=false; readySince=0; startPosition=position.coerceAtLeast(0); requestedAutoplay=autoplay
         if(autoplay) sleepStopped=false
         screen="player"; episodeIndex=selectedIndex; group=episodeIndex/20
-        panel=false; playError=false; playbackReady=false; quality=""; pausedForLifecycle=!autoplay
+        panel=false; playError=false; finaleShowing=false; playbackReady=false; quality=""; pausedForLifecycle=!autoplay
         player?.playWhenReady=requestedAutoplay
         prefetchAttempts=0; prefetchAttemptAt=0
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
@@ -1151,6 +1152,7 @@ class MainActivity: Activity() {
                         saveProgress(true)
                         if(sleepTimer.episodeEnded()) stopForSleep()
                         else if(foreground && requestedAutoplay && !pausedForLifecycle && library.autoNext && episodeIndex<data.episodes.lastIndex) playEpisode(episodeIndex+1)
+                        else if(foreground && episodeIndex==data.episodes.lastIndex && data.related.isNotEmpty()) showFinale(data)
                         else { requestedAutoplay=false; p.pause(); playbackText.text="本集已结束"; showPanel() }
                     }
                 }
@@ -1301,7 +1303,7 @@ class MainActivity: Activity() {
         if(prefetchAttempts>=3 || (prefetchAttempts>0 && now-prefetchAttemptAt<15_000) || connectivity.isActiveNetworkMetered || !networkAvailable()) return
         cancelPrefetch(); prefetchedFor=key; prefetchAttemptAt=now; prefetchAttempts++
         val ticket=preparedNext.begin(key)
-        val http=okhttp3.OkHttpClient.Builder().connectTimeout(8,java.util.concurrent.TimeUnit.SECONDS).readTimeout(15,java.util.concurrent.TimeUnit.SECONDS).callTimeout(20,java.util.concurrent.TimeUnit.SECONDS).build()
+        val http=okhttp3.OkHttpClient.Builder().connectTimeout(8,java.util.concurrent.TimeUnit.SECONDS).readTimeout(15,java.util.concurrent.TimeUnit.SECONDS).callTimeout(20,java.util.concurrent.TimeUnit.SECONDS).dns(Ipv4FirstDns).build()
         val source=ContentRepository(http); prefetchHttp=http
         val scope=RequestScope(); prefetchScope=scope
         prefetchJob=prefetchWorker.submit {
@@ -1358,6 +1360,7 @@ class MainActivity: Activity() {
         transportPlay?.text=if(player?.playWhenReady==true) "暂停" else "播放"
         sleepButton?.text="定时 ${sleepTimer.label()}"
         if(screen!="player" || playError) return
+        if(finaleShowing) { playbackText.text="本剧已播完 · 确认推荐继续看下一部，返回键回到选集"; return }
         if(sleepStopped) { playbackText.text="定时停止已生效 · 观看位置已保存 · 按播放可继续"; return }
         if(!playbackReady) { playbackText.text=(if(!requestedAutoplay) "准备后保持暂停 · " else "")+if(video==null) "正在获取播放地址…" else "正在缓冲…"; return }
         val p=player ?: return
@@ -1367,6 +1370,7 @@ class MainActivity: Activity() {
         progressBar.progress=if(duration>0) (position*1000/duration).toInt().coerceIn(0,1000) else 0
     }
     private fun requestPlayback(play: Boolean) {
+        if(play && finaleShowing) { finaleShowing=false; controls.removeAllViews() }
         requestedAutoplay=play; pausedForLifecycle=!play
         if(play) sleepStopped=false
         if(!play) { player?.pause(); retryAutoplay=false; saveProgress() }
@@ -1436,6 +1440,7 @@ class MainActivity: Activity() {
     }
     private fun showPanel() {
         if(playError) return
+        finaleShowing=false
         panel=true; showHud(); controls.visibility=View.VISIBLE; controls.removeAllViews()
         val transport=row(); controls.addView(transport)
         val play=addButton(transport,if(player?.playWhenReady==true) "暂停" else "播放") { togglePlayback() }.also { transportPlay=it }
@@ -1464,6 +1469,37 @@ class MainActivity: Activity() {
             })
         }.apply { tag="playback-settings" }
         play.requestFocus()
+    }
+    /** 末集播完的片尾：显示"本剧已播完"与相关推荐卡片，遥控器选剧，确认后直接开新剧 */
+    private fun showFinale(data: Detail) {
+        finaleShowing=true; requestedAutoplay=false
+        player?.pause()
+        panel=true; showHud(); progressBar.progress=1000
+        controls.visibility=View.VISIBLE; controls.removeAllViews()
+        controls.addView(text("《${data.series.title}》已播完 · 共 ${data.episodes.size} 集 · 选一部继续看",15f).apply { setPadding(0,dp(2),0,dp(8)) })
+        val scroll=HorizontalScrollView(this).apply { isHorizontalScrollBarEnabled=false; clipToPadding=false }
+        val line=row().apply { gravity=Gravity.TOP; setPadding(0,0,dp(4),dp(6)) }
+        val cards=mutableListOf<View>()
+        val width=dp(116)
+        data.related.forEach { item ->
+            val card=column(); focusStyle(card); card.setPadding(dp(4),dp(4),dp(4),dp(8)); card.contentDescription=item.title
+            val art=FrameLayout(this)
+            val image=ImageView(this).apply { scaleType=ImageView.ScaleType.FIT_CENTER; importantForAccessibility=View.IMPORTANT_FOR_ACCESSIBILITY_NO }
+            art.addView(image,FrameLayout.LayoutParams(-1,-1)); loadCover(image,item.cover)
+            card.addView(art,lp(-1,(width/TvStyle.POSTER_ASPECT).toInt()))
+            card.addView(text(item.title,13f).apply { maxLines=2; minLines=2; ellipsize=TextUtils.TruncateAt.END; setPadding(dp(2),dp(6),dp(2),0) },lp(-1,-2).apply { weight=1f })
+            if(item.badge.isNotBlank()) card.addView(text(item.badge,11f,muted).apply { maxLines=1; ellipsize=TextUtils.TruncateAt.END; setPadding(dp(2),dp(2),0,0) },lp(-1,-2))
+            card.setOnClickListener { finaleShowing=false; openDetail(item,resume=true) }
+            line.addView(card,lp(width,-2).apply { rightMargin=dp(10) })
+            cards+=card
+        }
+        scroll.addView(line); controls.addView(scroll,lp(-1,-2))
+        cards.forEachIndexed { index,card ->
+            card.nextFocusLeftId=cards.getOrNull(index-1)?.id ?: card.id
+            card.nextFocusRightId=cards.getOrNull(index+1)?.id ?: card.id
+        }
+        cards.first().requestFocus()
+        android.util.Log.i("HongguoTV","Series finale reached, ${data.related.size} recommendations shown")
     }
     private fun showSpeedPicker(anchor: TextView,inPlayer: Boolean=true) {
         if(speedDialog!=null) return
@@ -1528,6 +1564,7 @@ class MainActivity: Activity() {
     }
     private fun releasePlayer() {
         cancelRecovery(); cancelPrefetch(); mediaSession.deactivate(); tvTools.close()
+        finaleShowing=false
         resetDanmakuState(); danmakuFuture?.cancel(true); danmakuFuture=null
         danmakuView?.let { root.removeView(it) }; danmakuView=null
         val wasForeground=foreground; foreground=false
@@ -1547,7 +1584,7 @@ class MainActivity: Activity() {
     private fun goBack() {
         if(!library.isLoaded) { finish(); return }
         when(screen) {
-            "player" -> if(hud.visibility==View.VISIBLE && !playError) hidePlaybackOverlay() else returnToDetail()
+            "player" -> if(hud.visibility==View.VISIBLE && !playError && !finaleShowing) hidePlaybackOverlay() else returnToDetail()
             "detail" -> showCatalog()
             else -> if(collection!=null) { leaveCollection(); showCatalog() } else if(nav.any { it.hasFocus() }) { if(tab!=0) { switchTab(0); nav[0].requestFocus() } else finish() } else nav.getOrNull(tab)?.requestFocus()
         }
