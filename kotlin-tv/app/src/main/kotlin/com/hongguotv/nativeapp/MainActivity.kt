@@ -971,44 +971,66 @@ class MainActivity: Activity() {
         }
     }
 
-    /** 风控触发上行短信验证：用登录手机号向指定通道号回复短信，期间每 3 秒轮询。 */
+    /** 风控触发上行短信验证：弹窗出现即自动轮询（3 秒一轮，上限 5 分钟），
+     *  用户用登录手机号向指定通道号回复短信后自动重登。 */
     private fun showMfaPrompt(mobile: String,code: String,context: AccountApi.MfaContext,anchor: TextView) {
+        val reply=context.smsContent.ifEmpty { "任意内容" }
         val alert=AlertDialog.Builder(this)
             .setTitle("安全验证")
-            .setMessage("该账号触发了风控验证：\n\n请用登录手机号 $mobile 向 ${context.channel} 发送一条任意内容的短信，发送完成后回到电视点「我已发送」。")
+            .setMessage("该账号触发了风控验证：\n\n请用登录手机号 $mobile 编辑短信「$reply」发送到 ${context.channel}。\n\n正在等待短信验证…")
             .setNegativeButton("取消",null)
             .setPositiveButton("我已发送",null)
             .create()
         alert.show()
-        var attempts=0
+        val messageView=alert.findViewById<TextView>(android.R.id.message)
+        var rounds=0
+        var consecutiveErrors=0
+        var lastError: String?=null
         var currentToken=context.mfaToken
         fun poll() {
             io.submit {
-                val state=runCatching { account.upsmsVerify(context.copy(mfaToken=currentToken)) }.getOrNull()
+                val state=runCatching { account.upsmsVerify(context.copy(mfaToken=currentToken),csrf=loginCsrf) }
                 main.post {
                     if(isDestroyed || !alert.isShowing) return@post
-                    when(state) {
-                        null -> { attempts++; if(attempts<5) main.postDelayed({ poll() },3000) else { alert.dismiss(); tvTools.info("安全验证失败","暂时无法确认短信验证状态，请稍后重新登录。",anchor) } }
-                        is AccountApi.UpsmsState.Waiting -> { attempts++; if(attempts<20) main.postDelayed({ poll() },3000) else { alert.dismiss(); tvTools.info("安全验证超时","未检测到上行短信，请重新登录重试。",anchor) } }
-                        is AccountApi.UpsmsState.Registered -> { state.mfaToken.takeIf { it.isNotEmpty() }?.let { currentToken=it }; alert.dismiss(); reloginAfterMfa(mobile,code,currentToken,anchor) }
-                    }
+                    state.fold(onSuccess={ outcome ->
+                        consecutiveErrors=0
+                        when(outcome) {
+                            is AccountApi.UpsmsState.Waiting -> {
+                                rounds++
+                                if(rounds<100) main.postDelayed({ if(alert.isShowing) poll() },3000)
+                                else { alert.dismiss(); tvTools.info("安全验证超时","5 分钟内未检测到上行短信，请重新登录重试。",anchor) }
+                            }
+                            is AccountApi.UpsmsState.Registered -> {
+                                outcome.mfaToken.takeIf { it.isNotEmpty() }?.let { currentToken=it }
+                                messageView?.text="验证通过，正在登录…"
+                                reloginAfterMfa(mobile,code,currentToken,anchor) { alert.dismiss() }
+                            }
+                        }
+                    },onFailure={ failure ->
+                        rounds++; consecutiveErrors++; lastError=failure.message
+                        // 单次网络抖动不致命：继续等；连续失败才退出并显示真实原因
+                        if(consecutiveErrors>=8) { alert.dismiss(); tvTools.info("安全验证失败",lastError ?: "请稍后重试",anchor) }
+                        else if(rounds<100) main.postDelayed({ if(alert.isShowing) poll() },3000)
+                    })
                 }
             }
         }
-        alert.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener { attempts=0; poll() }
+        alert.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener { rounds=0; consecutiveErrors=0; poll() }
+        poll()
     }
 
-    private fun reloginAfterMfa(mobile: String,code: String,mfaToken: String,anchor: TextView) {
+    private fun reloginAfterMfa(mobile: String,code: String,mfaToken: String,anchor: TextView,close: ()->Unit={}) {
         io.submit {
             val result=runCatching { account.smsLogin(mobile,code,csrf=loginCsrf,mfaToken=mfaToken) }
             main.post {
                 if(isDestroyed) return@post
                 result.onSuccess { outcome ->
                     when(outcome) {
-                        is AccountApi.LoginResult.Success -> onLoginSuccess(outcome.session)
-                        is AccountApi.LoginResult.Mfa -> tvTools.info("安全验证未完成","风控仍未通过，请稍后重新登录。",anchor)
+                        is AccountApi.LoginResult.Success -> { close(); onLoginSuccess(outcome.session) }
+                        // 服务端换了一种验证方式：带着新上下文重新走一轮
+                        is AccountApi.LoginResult.Mfa -> { close(); showMfaPrompt(mobile,code,outcome.context,anchor) }
                     }
-                }.onFailure { tvTools.info("登录失败",it.message ?: "请稍后重试",anchor) }
+                }.onFailure { close(); tvTools.info("登录失败",it.message ?: "请稍后重试",anchor) }
             }
         }
     }

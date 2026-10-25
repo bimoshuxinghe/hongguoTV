@@ -35,7 +35,7 @@ class AccountApi(
     data class PassportUser(val userId: String,val name: String,val avatar: String)
     data class SendCode(val message: String,val csrf: String,val retrySeconds: Int)
     /** MFA 上行短信验证上下文（风控触发时下发，channel 已替换为可回复的真实通道号） */
-    data class MfaContext(val retryTag: String,val smsCodeKey: String,val mfaToken: String,val encryptUid: String,val logId: String,val verifyReason: String,val verifyScene: String,val copywritingKey: String,val diversionTag: String,val channel: String,val tips: String)
+    data class MfaContext(val retryTag: String,val smsCodeKey: String,val mfaToken: String,val encryptUid: String,val logId: String,val verifyReason: String,val verifyScene: String,val copywritingKey: String,val diversionTag: String,val channel: String,val smsContent: String,val tips: String)
     sealed class LoginResult {
         data class Success(val session: Session): LoginResult()
         data class Mfa(val context: MfaContext): LoginResult()
@@ -139,8 +139,11 @@ class AccountApi(
     }
 
     /** MFA 上行短信验证轮询（单次调用；UI 每 3 秒重发）。
+     *  [csrf] 传发码响应的 passport_csrf_token——参考实现 with_csrf 注释实证：
+     *  「sms_login / 轮询都必须带上，否则服务端不认这次会话」。
+     *  mfa_token 缺了服务端永远回 1045；csrf 缺了直接报会话错误。
      *  用户按短信提示回复后 registered=true 表示通过，新 token 随 Set-Cookie 下发。 */
-    fun upsmsVerify(context: MfaContext): UpsmsState {
+    fun upsmsVerify(context: MfaContext,csrf: String=""): UpsmsState {
         val biz=JSONObject().put("passport_mfa_retry_tag",context.retryTag).put("sms_code_key",context.smsCodeKey)
         val form=listOf(
             "biz_params" to biz.toString(),"copywriting_key" to context.copywritingKey,
@@ -149,7 +152,10 @@ class AccountApi(
             "new_authn_sdk_verify_scene" to context.verifyScene,"new_authn_sdk_version" to "1.1.31",
             "request_tag_from" to "h5","verify_reason" to context.verifyReason,"verify_scene" to context.verifyScene,
             "new_verify_flow" to "","verify_ticket" to "")
-        val cookie=if(context.mfaToken.isEmpty()) "" else "passport_mfa_token=${context.mfaToken}"
+        val cookie=buildList {
+            if(csrf.isNotEmpty()) { add("passport_csrf_token=$csrf"); add("passport_csrf_token_default=$csrf") }
+            if(context.mfaToken.isNotEmpty()) add("passport_mfa_token=${context.mfaToken}")
+        }.joinToString("; ")
         val raw=passportCall("/passport/upsms/verify/",form,sdkRom=false,cookie=cookie)
         return interpretUpsms(JSONObject(raw.body),raw.setCookies,context.mfaToken)
     }
@@ -195,9 +201,9 @@ class AccountApi(
             val retryTag=biz?.str("passport_mfa_retry_tag").orEmpty()
             val smsKey=biz?.str("sms_code_key").orEmpty()
             if(retryTag.isNotEmpty() && smsKey.isNotEmpty()) {
-                var channel=""
+                var channel=""; var smsContent=""
                 for(way in (data?.optJSONArray("verify_ways") ?: o.optJSONArray("verify_ways")).objects()) {
-                    if(way.str("verify_way")=="mobile_up_sms_verify") { channel=realUpsmsChannel(way.str("channel_mobile")); break }
+                    if(way.str("verify_way")=="mobile_up_sms_verify") { channel=realUpsmsChannel(way.str("channel_mobile")); smsContent=way.str("sms_content"); break }
                 }
                 val events=data?.optJSONObject("event_params")
                 val common=data?.optJSONObject("common_params")
@@ -209,7 +215,7 @@ class AccountApi(
                     verifyScene=fieldOf(events,"verify_scene").ifEmpty { "sms_login" },
                     copywritingKey=fieldOf(common,"copywriting_key").ifEmpty { "sms_login" },
                     diversionTag=fieldOf(common,"ies_safety_diversion_tag").ifEmpty { "mfa" },
-                    channel=channel,
+                    channel=channel,smsContent=smsContent,
                     tips=fieldOf(data,"verify_scene_desc","description").ifEmpty { o.str("message") }))
             }
             requireOk(o,"登录失败")

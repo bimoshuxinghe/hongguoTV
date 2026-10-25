@@ -65,6 +65,7 @@ class AccountApiTest {
         assertEquals("fb2825d4c17fad783d28724dd8aebe5e",mfa.smsCodeKey)
         assertEquals("CjeRkKbStbWgOEQpGsdgfE0qpV8RtNI1eV77042U15V",mfa.mfaToken)
         assertEquals("10691859839103",mfa.channel)
+        assertEquals("YZ",mfa.smsContent)
         assertEquals("9bRhVfo5rymE",mfa.encryptUid)
         assertEquals("2026100422LOG",mfa.logId)
         assertTrue(mfa.tips.contains("完成身份验证"))
