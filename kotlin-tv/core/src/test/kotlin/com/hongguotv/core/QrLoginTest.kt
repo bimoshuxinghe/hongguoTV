@@ -47,6 +47,16 @@ class QrLoginTest {
         assertTrue(missing.message!!.contains("token"))
     }
 
+    /** 官方 copywriting 写「抖音 APP 扫码」会误导（实测抖音/红果不识别此码）→ 替换为番茄提示 */
+    @Test fun parseQrcodeReplacesDouyinCopywriting() {
+        val pngBase64=java.util.Base64.getEncoder().encodeToString(byteArrayOf(0x89.toByte(),0x50,0x4e,0x47))
+        val qr=QrLogin.parseQrcode(JSONObject()
+            .put("token","t").put("qrcode","data:image/png;base64,$pngBase64")
+            .put("copywriting","""{"desc":"请使用[color=red]「抖音 APP」[/]扫码验证"}"""))
+        assertTrue(qr.prompt.contains("番茄小说"))
+        assertTrue(!qr.prompt.contains("抖音 APP"))
+    }
+
     /** check_qrconnect 状态归一：redirect_url / confirmed 同义、scanned 提示、error_code 过期 */
     @Test fun parsePollMapsStates() {
         assertEquals(QrLogin.State.CONFIRMED,QrLogin.parsePoll(JSONObject().put("status","new").put("redirect_url","https://x/y")).state)

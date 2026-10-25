@@ -934,7 +934,7 @@ class MainActivity: Activity() {
     /** 设置页入口：未登录提供扫码（免风控，推荐）与短信两种登录；已登录提供手动同步与退出。 */
     private fun showAccountMenu(anchor: TextView) {
         if(library.account()==null) {
-            tvTools.choose("登录红果账号",listOf("扫码登录（抖音 / 番茄 / 红果 APP 扫码，免风控）","短信验证码登录"),anchor,onChoice={ choice ->
+            tvTools.choose("登录红果账号",listOf("扫码登录（番茄小说 APP 扫码，免风控）","短信验证码登录"),anchor,onChoice={ choice ->
                 if(choice==0) showQrLogin(anchor)
                 else tvTools.digitInput("登录红果账号","输入手机号（11 位，验证码短信将发到该手机）",11,11,anchor) { mobile -> sendLoginCode(mobile,anchor) }
             })
@@ -963,7 +963,8 @@ class MainActivity: Activity() {
 
     /** 扫码登录：展示网页版 passport 下发的二维码，3 秒轮询扫码状态；confirmed 后
      *  收割 web 会话 cookie 注入 App 接口。短信链路被账号风控卡死时的主出路——
-     *  抖音/番茄/红果任一 APP 扫码确认即完成登录，不依赖设备档案与 passport 签名。 */
+     *  实测只有番茄小说 APP 识别此码（服务端把码标注为番茄可扫），且番茄/红果
+     *  同挂一个 passport 手机号账号：APP 里登录哪个手机号，登进来的就是谁。 */
     private fun showQrLogin(anchor: TextView) {
         val qrView=ImageView(this).apply {
             layoutParams=LinearLayout.LayoutParams(560,560)
@@ -973,10 +974,16 @@ class MainActivity: Activity() {
             setPadding(0,28,0,0)
             layoutParams=LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT,ViewGroup.LayoutParams.WRAP_CONTENT)
         }
+        val tipView=TextView(this).apply {
+            textSize=13f; setTextColor(muted); gravity=Gravity.CENTER
+            setPadding(0,0,0,8)
+            text="用番茄小说 APP 右上角「扫一扫」；确认前请确保 APP 里登录的是你红果绑定的手机号（抖音 / 红果 APP 不识别此码）"
+            layoutParams=LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT,ViewGroup.LayoutParams.WRAP_CONTENT)
+        }
         val box=LinearLayout(this).apply {
             orientation=LinearLayout.VERTICAL; gravity=Gravity.CENTER
             setPadding(56,40,56,32)
-            addView(qrView); addView(statusView)
+            addView(tipView); addView(qrView); addView(statusView)
         }
         val alert=AlertDialog.Builder(this).setTitle("扫码登录红果账号").setView(box)
             .setNegativeButton("取消",null).create()
@@ -1170,10 +1177,21 @@ class MainActivity: Activity() {
                 if(isDestroyed || !foreground) return@post
                 result.onSuccess { (applied,total) ->
                     if(applied>0 && screen=="catalog") refreshLibraryCards("")
-                    if(showToast || applied>0) Toast.makeText(this,if(applied>0) "已同步云端播放记录（$total 条，$applied 部更新）" else "云端记录已是最新（$total 条）",Toast.LENGTH_SHORT).show()
+                    if(showToast || applied>0) {
+                        val text=when {
+                            // 接口未拒绝但 0 条＝会话在红果域有效、该账号红果域确实无记录
+                            total==0 -> "该账号在红果云端没有观看记录——若这不是你的主账号，请在番茄小说 APP 切换到红果绑定的手机号后重新扫码"
+                            applied>0 -> "已同步红果云端记录（共 $total 条，本机更新 $applied 部）"
+                            else -> "云端记录已是最新（$total 条）"
+                        }
+                        Toast.makeText(this,text,Toast.LENGTH_LONG).show()
+                    }
                 }.onFailure { failure ->
+                    val reason=failure.message ?: "请稍后重试"
+                    val hint=if(reason.contains("USER_NOT_LOGIN")||reason.contains("未登录"))
+                        "会话在红果域未生效（$reason）——请退出后重新扫码" else reason
                     if((failure as? PassportReject)?.code==22L) io.submit { library.rotateDevice() }
-                    if(showToast) tvTools.info("同步失败",failure.message ?: "请稍后重试",accountEntry)
+                    if(showToast) tvTools.info("同步失败",hint,accountEntry)
                     android.util.Log.w("HongguoTV","云端播放记录同步失败",failure)
                 }
             }

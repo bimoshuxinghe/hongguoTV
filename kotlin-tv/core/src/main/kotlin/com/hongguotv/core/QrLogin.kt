@@ -46,7 +46,9 @@ class QrLogin {
 
     /** confirmed 后收割会话：跟随 redirect_url（失败不致命——参考实现里 session 罐
      *  在 confirm 时往往已收到 sessionid），再取用户资料。
-     *  x-tt-token 退化为 sid_tt/sessionid 值，App 接口以 Cookie 鉴权为主。 */
+     *  身份查询直接走红果域（aid=8662）info/v2：字节各 APP 的 user_id 不同但同挂一个
+     *  passport 账号，红果域返回的就是该手机号在红果的账号（name/userId）；
+     *  红果域解析失败时回落 web 域（2503）仅作展示。 */
     fun harvest(http: OkHttpClient=defaultHttp(),redirectUrl: String): AccountApi.Session {
         if(redirectUrl.isNotEmpty()) runCatching { followRedirects(http,redirectUrl) }
             .onFailure { if(jar.isEmpty()) throw IOException("扫码跳转失败：${it.message}") }
@@ -58,9 +60,14 @@ class QrLogin {
             val got=jar.keys.joinToString(",").ifEmpty { "无" }
             throw IOException("未收到会话凭证（服务端下发: $got）")
         }
+        // 红果域（8662）优先——失败（会话过期=13 等）回落 web 域，仅用于展示用户名
         val user=runCatching {
-            parseInfoV2(JSONObject(get(http,query("$SITE/passport/account/info/v2/",baseQuery()))).optJSONObject("data") ?: JSONObject())
-        }.getOrDefault(AccountApi.PassportUser("","",""))
+            parseInfoV2(JSONObject(get(http,query(APP_INFO_URL,appInfoQuery()))).optJSONObject("data") ?: JSONObject())
+        }.getOrElse {
+            runCatching {
+                parseInfoV2(JSONObject(get(http,query("$SITE/passport/account/info/v2/",baseQuery()))).optJSONObject("data") ?: JSONObject())
+            }.getOrDefault(AccountApi.PassportUser("","",""))
+        }
         val pairs=cookies.split("; ")
         val token=pairs.firstOrNull { it.startsWith("sid_tt=") }?.substringAfter('=')
             ?: pairs.firstOrNull { it.startsWith("sessionid=") }?.substringAfter('=').orEmpty()
@@ -116,6 +123,9 @@ class QrLogin {
     companion object {
         const val SITE="https://hongguoduanju.com"
         internal const val AID="2503"
+        /** 红果域 passport（novel.snssdk.com，aid=8662）：web 会话跨域通用，
+         *  用它查用户身份即得「红果账号」——UID 是红果域的，与番茄域不同 */
+        internal const val APP_INFO_URL="https://novel.snssdk.com/passport/account/info/v2/"
         internal const val SDK_VERSION="3.0.16"
         internal const val WEB_UA="Mozilla/5.0 (Linux; Android 12) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36"
         const val POLL_INTERVAL_MS=3000L
@@ -125,6 +135,10 @@ class QrLogin {
         internal fun baseQuery(next: String="/"): LinkedHashMap<String,String> = linkedMapOf(
             "aid" to AID,"language" to "zh","account_sdk_source" to "web",
             "passport_jssdk_version" to SDK_VERSION,"passport_jssdk_type" to "normal","next" to next)
+
+        /** 红果域 info/v2 的 query（aid=8662） */
+        private fun appInfoQuery(): LinkedHashMap<String,String> = linkedMapOf(
+            "aid" to "8662","language" to "zh","account_sdk_source" to "web")
 
         /** 扫码专用客户端（app 壳持有单例复用）：关自动重定向以便逐跳收割 Set-Cookie */
         fun defaultHttp(): OkHttpClient=OkHttpClient.Builder()
@@ -140,8 +154,11 @@ class QrLogin {
                 .getOrElse { throw IOException("二维码图片解码失败") }
             if(png.isEmpty()) throw IOException("二维码图片为空")
             val expire=data.optLong("expire_time",0)
-            return QrCode(token,png,
-                cleanCopywriting(data.str("copywriting")).ifEmpty { "请用「番茄小说 / 抖音 / 红果」APP 扫码，并在手机上确认" },
+            // 官方 copywriting 常写「抖音 APP 扫码验证」，实测抖音/红果不识别此码（服务端
+            // 把 qrcode_index_url 标注为 outSideAppName=番茄小说），只有番茄小说 APP 能扫。
+            val prompt=cleanCopywriting(data.str("copywriting"))
+            val fallback="请用「番茄小说」APP 扫码并在手机上确认（抖音 / 红果 APP 不识别此码）"
+            return QrCode(token,png, if(prompt.isEmpty() || prompt.contains("抖音")) fallback else prompt,
                 if(expire in 30..3600) expire*1000 else TTL_FALLBACK_MS)
         }
 
