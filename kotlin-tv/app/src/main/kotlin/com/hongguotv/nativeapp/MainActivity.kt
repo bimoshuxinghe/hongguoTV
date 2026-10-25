@@ -966,8 +966,15 @@ class MainActivity: Activity() {
      *  码必须以 aid=513755（红果短剧PC站）生成才会落到红果短剧 App 扫码页，
      *  用红果短剧/抖音 APP 扫码确认即登录红果账号（番茄域的 2503 码已废弃）。 */
     private fun showQrLogin(anchor: TextView) {
+        val dm=resources.displayMetrics
+        // 状态行说明区（标题+说明+状态+按钮）的像素预算，二维码取剩余空间——
+        // 否则低分辨率电视上二维码与状态文字会被弹窗直接裁掉，码扫不到
+        val reserved=(300*dm.density).toInt()
+        val qrSize=560.coerceAtMost(dm.heightPixels-reserved)
+            .coerceAtMost(dm.widthPixels-(160*dm.density).toInt()).coerceAtLeast(280)
         val qrView=ImageView(this).apply {
-            layoutParams=LinearLayout.LayoutParams(560,560)
+            layoutParams=LinearLayout.LayoutParams(qrSize,qrSize)
+            scaleType=ImageView.ScaleType.FIT_CENTER
         }
         val statusView=TextView(this).apply {
             textSize=16f; setTextColor(white); gravity=Gravity.CENTER
@@ -977,20 +984,23 @@ class MainActivity: Activity() {
         val tipView=TextView(this).apply {
             textSize=13f; setTextColor(muted); gravity=Gravity.CENTER
             setPadding(0,0,0,8)
-            text="用「红果短剧」APP 我的界面右上角「扫一扫」扫码，手机上确认即可（抖音 APP 扫码同样可用）"
+            text="用「红果短剧」APP 我的右上角「扫一扫」扫码并确认（抖音 APP 扫码同样可用）"
             layoutParams=LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT,ViewGroup.LayoutParams.WRAP_CONTENT)
         }
         val box=LinearLayout(this).apply {
             orientation=LinearLayout.VERTICAL; gravity=Gravity.CENTER
-            setPadding(56,40,56,32)
+            setPadding(48,32,48,24)
             addView(tipView); addView(qrView); addView(statusView)
         }
-        val alert=AlertDialog.Builder(this).setTitle("扫码登录红果账号").setView(box)
+        // 包一层 ScrollView：极端分辨率/大字号系统下内容超高时可滚动，绝不裁剪二维码
+        val scroll=ScrollView(this).apply { isFillViewport=true; addView(box) }
+        val alert=AlertDialog.Builder(this).setTitle("扫码登录红果账号").setView(scroll)
             .setNegativeButton("取消",null).create()
         var dismissed=false
         alert.setOnDismissListener { dismissed=true }
         alert.show()
-        alert.window?.setLayout(720,ViewGroup.LayoutParams.WRAP_CONTENT)
+        alert.window?.setLayout((dm.widthPixels-(120*dm.density).toInt()).coerceAtMost(760),
+            ViewGroup.LayoutParams.WRAP_CONTENT)
         io.submit {
             var consecutiveErrors=0
             while(!dismissed && !isDestroyed && account.session==null) {
@@ -998,7 +1008,14 @@ class MainActivity: Activity() {
                     val qr=qrLogin.newQrcode(qrHttp)
                     consecutiveErrors=0
                     val bitmap=android.graphics.BitmapFactory.decodeByteArray(qr.png,0,qr.png.size)
-                    main.post { if(!dismissed) { qrView.setImageBitmap(bitmap); statusView.text=qr.prompt } }
+                    main.post {
+                        if(!dismissed) {
+                            qrView.setImageBitmap(bitmap)
+                            // 关闭插值滤波：放大显示时保持模块边缘锐利，手机更容易对焦识别
+                            (qrView.drawable as? android.graphics.drawable.BitmapDrawable)?.paint?.isFilterBitmap=false
+                            statusView.text=qr.prompt
+                        }
+                    }
                     var session: AccountApi.Session?=null
                     val deadline=System.currentTimeMillis()+qr.ttlMs
                     while(!dismissed && !isDestroyed && session==null && System.currentTimeMillis()<deadline) {
