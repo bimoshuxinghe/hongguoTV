@@ -208,7 +208,8 @@ class MainActivity: Activity() {
     private var lastSaved=0L
     // 红果账号双端互通：登录会话由 Library 持久化，播放进度回传 30 秒节流
     private val account=AccountApi()
-    /** 扫码登录专用客户端（web passport 端点，关自动重定向以便逐跳收 cookie） */
+    /** 扫码登录：有状态会话（cookie 罐全程累积）+ web passport 专用客户端 */
+    private val qrLogin=QrLogin()
     private val qrHttp=QrLogin.defaultHttp()
     private var accountEntry: TextView?=null
     private var lastCloudUpload=0L
@@ -987,7 +988,7 @@ class MainActivity: Activity() {
             var consecutiveErrors=0
             while(!dismissed && !isDestroyed && account.session==null) {
                 try {
-                    val qr=QrLogin.newQrcode(qrHttp)
+                    val qr=qrLogin.newQrcode(qrHttp)
                     consecutiveErrors=0
                     val bitmap=android.graphics.BitmapFactory.decodeByteArray(qr.png,0,qr.png.size)
                     main.post { if(!dismissed) { qrView.setImageBitmap(bitmap); statusView.text=qr.prompt } }
@@ -996,13 +997,16 @@ class MainActivity: Activity() {
                     while(!dismissed && !isDestroyed && session==null && System.currentTimeMillis()<deadline) {
                         Thread.sleep(QrLogin.POLL_INTERVAL_MS)
                         if(dismissed || isDestroyed) break
-                        val poll=QrLogin.check(qrHttp,qr.token)
+                        val poll=qrLogin.check(qrHttp,qr.token)
                         when(poll.state) {
                             QrLogin.State.SCANNED -> main.post { if(!dismissed) statusView.text="已扫码，请在手机上确认" }
                             QrLogin.State.CONFIRMED -> {
-                                main.post { if(!dismissed) statusView.text="登录成功，正在同步账号…" }
-                                session=runCatching { QrLogin.harvest(qrHttp,poll.redirectUrl) }.getOrNull()
-                                if(session==null) main.post { if(!dismissed) statusView.text="会话获取失败，正在重试…" }
+                                main.post { if(!dismissed) statusView.text="登录成功，正在获取账号信息…" }
+                                val outcome=runCatching { qrLogin.harvest(qrHttp,poll.redirectUrl) }
+                                session=outcome.getOrNull()
+                                if(session==null) main.post {
+                                    if(!dismissed) statusView.text="会话获取失败（${outcome.exceptionOrNull()?.message ?: "未知"}），正在重试…"
+                                }
                             }
                             else -> {}
                         }
