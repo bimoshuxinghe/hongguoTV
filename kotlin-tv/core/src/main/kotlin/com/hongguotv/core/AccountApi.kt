@@ -15,7 +15,7 @@ import org.json.JSONArray
 import org.json.JSONObject
 
 /** passport 业务拒绝（error_code 在 data 里）。22=非法应用：设备档案被服务端清理，
- *  唯一出路是轮换设备档案（重新注册）后重试，重试登录本身无意义。 */
+ *  出路是轮换设备档案（重新注册）后重试，或改走扫码登录（QrLogin，不依赖设备档案）。 */
 class PassportReject(val code: Long,message: String): IOException(message)
 
 /**
@@ -383,7 +383,10 @@ class AccountApi(
     private fun sessionHeaders(): List<Pair<String,String>> {
         val current=session
         val headers=mutableListOf("Cookie" to cookieHeader(""))
-        if(current!=null && current.token.isNotEmpty()) headers+="x-tt-token" to current.token.take(56)
+        if(current!=null && current.token.isNotEmpty()) {
+            // App 长形式（xx--expire-uid）按抓包只带前 56 位；扫码登录的 web sessionid 短形式原样
+            headers+="x-tt-token" to (if(current.token.contains("--")) current.token.take(56) else current.token)
+        }
         return headers
     }
 

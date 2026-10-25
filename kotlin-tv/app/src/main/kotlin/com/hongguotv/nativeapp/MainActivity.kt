@@ -208,6 +208,8 @@ class MainActivity: Activity() {
     private var lastSaved=0L
     // 红果账号双端互通：登录会话由 Library 持久化，播放进度回传 30 秒节流
     private val account=AccountApi()
+    /** 扫码登录专用客户端（web passport 端点，关自动重定向以便逐跳收 cookie） */
+    private val qrHttp=QrLogin.defaultHttp()
     private var accountEntry: TextView?=null
     private var lastCloudUpload=0L
     private var syncingCloud=false
@@ -928,10 +930,13 @@ class MainActivity: Activity() {
         return session.name.ifEmpty { if(session.userId.isNotEmpty()) "UID ${session.userId}" else "已登录" }
     }
 
-    /** 设置页入口：未登录走短信登录；已登录提供手动同步与退出。 */
+    /** 设置页入口：未登录提供扫码（免风控，推荐）与短信两种登录；已登录提供手动同步与退出。 */
     private fun showAccountMenu(anchor: TextView) {
         if(library.account()==null) {
-            tvTools.digitInput("登录红果账号","输入手机号（11 位，验证码短信将发到该手机）",11,11,anchor) { mobile -> sendLoginCode(mobile,anchor) }
+            tvTools.choose("登录红果账号",listOf("扫码登录（抖音 / 番茄 / 红果 APP 扫码，免风控）","短信验证码登录"),anchor,onChoice={ choice ->
+                if(choice==0) showQrLogin(anchor)
+                else tvTools.digitInput("登录红果账号","输入手机号（11 位，验证码短信将发到该手机）",11,11,anchor) { mobile -> sendLoginCode(mobile,anchor) }
+            })
             return
         }
         tvTools.choose("红果账号  ·  ${accountLabel()}",listOf("同步云端播放记录","退出登录"),anchor,onChoice={ choice ->
@@ -953,6 +958,73 @@ class MainActivity: Activity() {
         if(mobile!=null) sendLoginCode(mobile,anchor,retryAfterRotate=true)
         else Toast.makeText(this,"设备验证已重置，请重新登录",Toast.LENGTH_LONG).show()
         return true
+    }
+
+    /** 扫码登录：展示网页版 passport 下发的二维码，3 秒轮询扫码状态；confirmed 后
+     *  收割 web 会话 cookie 注入 App 接口。短信链路被账号风控卡死时的主出路——
+     *  抖音/番茄/红果任一 APP 扫码确认即完成登录，不依赖设备档案与 passport 签名。 */
+    private fun showQrLogin(anchor: TextView) {
+        val qrView=ImageView(this).apply {
+            layoutParams=LinearLayout.LayoutParams(560,560)
+        }
+        val statusView=TextView(this).apply {
+            textSize=16f; setTextColor(white); gravity=Gravity.CENTER
+            setPadding(0,28,0,0)
+            layoutParams=LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT,ViewGroup.LayoutParams.WRAP_CONTENT)
+        }
+        val box=LinearLayout(this).apply {
+            orientation=LinearLayout.VERTICAL; gravity=Gravity.CENTER
+            setPadding(56,40,56,32)
+            addView(qrView); addView(statusView)
+        }
+        val alert=AlertDialog.Builder(this).setTitle("扫码登录红果账号").setView(box)
+            .setNegativeButton("取消",null).create()
+        var dismissed=false
+        alert.setOnDismissListener { dismissed=true }
+        alert.show()
+        alert.window?.setLayout(720,ViewGroup.LayoutParams.WRAP_CONTENT)
+        io.submit {
+            var consecutiveErrors=0
+            while(!dismissed && !isDestroyed && account.session==null) {
+                try {
+                    val qr=QrLogin.newQrcode(qrHttp)
+                    consecutiveErrors=0
+                    val bitmap=android.graphics.BitmapFactory.decodeByteArray(qr.png,0,qr.png.size)
+                    main.post { if(!dismissed) { qrView.setImageBitmap(bitmap); statusView.text=qr.prompt } }
+                    var session: AccountApi.Session?=null
+                    val deadline=System.currentTimeMillis()+qr.ttlMs
+                    while(!dismissed && !isDestroyed && session==null && System.currentTimeMillis()<deadline) {
+                        Thread.sleep(QrLogin.POLL_INTERVAL_MS)
+                        if(dismissed || isDestroyed) break
+                        val poll=QrLogin.check(qrHttp,qr.token)
+                        when(poll.state) {
+                            QrLogin.State.SCANNED -> main.post { if(!dismissed) statusView.text="已扫码，请在手机上确认" }
+                            QrLogin.State.CONFIRMED -> {
+                                main.post { if(!dismissed) statusView.text="登录成功，正在同步账号…" }
+                                session=runCatching { QrLogin.harvest(qrHttp,poll.redirectUrl) }.getOrNull()
+                                if(session==null) main.post { if(!dismissed) statusView.text="会话获取失败，正在重试…" }
+                            }
+                            else -> {}
+                        }
+                    }
+                    val done=session
+                    if(done!=null) {
+                        main.post { if(!dismissed) alert.dismiss(); onLoginSuccess(done) }
+                        return@submit
+                    }
+                    // 二维码过期或收割失败：回到循环顶部自动换新码
+                } catch(failure: Exception) {
+                    consecutiveErrors++
+                    if(consecutiveErrors>=5 || dismissed || isDestroyed) {
+                        main.post {
+                            if(!dismissed) { alert.dismiss(); tvTools.info("扫码登录失败",failure.message ?: "请稍后重试",anchor) }
+                        }
+                        return@submit
+                    }
+                    runCatching { Thread.sleep(3000) }
+                }
+            }
+        }
     }
 
     private fun sendLoginCode(mobile: String,anchor: TextView,retryAfterRotate: Boolean=false) {
