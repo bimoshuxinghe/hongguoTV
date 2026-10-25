@@ -942,8 +942,23 @@ class MainActivity: Activity() {
         })
     }
 
-    private fun sendLoginCode(mobile: String,anchor: TextView) {
+    /** passport 22「非法应用」＝设备档案被服务端清理（error_code=22）：立即轮换设备档案。
+     *  带手机号时自动重发验证码引导重登，否则提示重新走登录；轮换失败给出网络提示。 */
+    private fun maybeRotateAfterReject(failure: Throwable,anchor: TextView,prefix: String,mobile: String?=null): Boolean {
+        if((failure as? PassportReject)?.code!=22L) return false
+        if(!library.rotateDevice()) {
+            tvTools.info(prefix,"设备验证重置失败（${failure.message}），请检查网络后重试",anchor)
+            return true
+        }
+        if(mobile!=null) sendLoginCode(mobile,anchor,retryAfterRotate=true)
+        else Toast.makeText(this,"设备验证已重置，请重新登录",Toast.LENGTH_LONG).show()
+        return true
+    }
+
+    private fun sendLoginCode(mobile: String,anchor: TextView,retryAfterRotate: Boolean=false) {
         io.submit {
+            // 登录对设备身份敏感：从未注册的设备 passport 直接回 22，先确保档案就绪（幂等）
+            library.ensureDevice()
             val result=runCatching { account.sendCode(mobile) }
             main.post {
                 if(isDestroyed) return@post
@@ -951,7 +966,10 @@ class MainActivity: Activity() {
                     loginCsrf=sent.csrf
                     Toast.makeText(this,sent.message,Toast.LENGTH_LONG).show()
                     tvTools.digitInput("输入验证码","验证码已发送到 $mobile，收到短信后输入",4,6,anchor) { code -> submitLogin(mobile,code,anchor) }
-                }.onFailure { tvTools.info("发送验证码失败",it.message ?: "请稍后重试",anchor) }
+                }.onFailure { failure ->
+                    if(!retryAfterRotate && maybeRotateAfterReject(failure,anchor,"发送验证码失败",mobile)) return@post
+                    tvTools.info("发送验证码失败",failure.message ?: "请稍后重试",anchor)
+                }
             }
         }
     }
@@ -966,7 +984,9 @@ class MainActivity: Activity() {
                         is AccountApi.LoginResult.Success -> onLoginSuccess(outcome.session)
                         is AccountApi.LoginResult.Mfa -> showMfaPrompt(mobile,code,outcome.context,anchor)
                     }
-                }.onFailure { tvTools.info("登录失败",it.message ?: "请稍后重试",anchor) }
+                }.onFailure { failure ->
+                    if(!maybeRotateAfterReject(failure,anchor,"登录失败",mobile)) tvTools.info("登录失败",failure.message ?: "请稍后重试",anchor)
+                }
             }
         }
     }
@@ -1030,7 +1050,10 @@ class MainActivity: Activity() {
                         // 服务端换了一种验证方式：带着新上下文重新走一轮
                         is AccountApi.LoginResult.Mfa -> { close(); showMfaPrompt(mobile,code,outcome.context,anchor) }
                     }
-                }.onFailure { close(); tvTools.info("登录失败",it.message ?: "请稍后重试",anchor) }
+                }.onFailure { failure ->
+                    close()
+                    if(!maybeRotateAfterReject(failure,anchor,"登录失败",mobile)) tvTools.info("登录失败",failure.message ?: "请稍后重试",anchor)
+                }
             }
         }
     }
@@ -1073,6 +1096,7 @@ class MainActivity: Activity() {
                     if(applied>0 && screen=="catalog") refreshLibraryCards("")
                     if(showToast || applied>0) Toast.makeText(this,if(applied>0) "已同步云端播放记录（$total 条，$applied 部更新）" else "云端记录已是最新（$total 条）",Toast.LENGTH_SHORT).show()
                 }.onFailure { failure ->
+                    if((failure as? PassportReject)?.code==22L) io.submit { library.rotateDevice() }
                     if(showToast) tvTools.info("同步失败",failure.message ?: "请稍后重试",accountEntry)
                     android.util.Log.w("HongguoTV","云端播放记录同步失败",failure)
                 }
@@ -1746,7 +1770,11 @@ class MainActivity: Activity() {
         lastCloudUpload=now
         io.submit {
             runCatching { account.reportProgress(progress.series.id,progress.episodeId,progress.episodeIndex,if(progress.completed && progress.position<=0) progress.duration else progress.position) }
-                .onFailure { android.util.Log.w("HongguoTV","播放进度回传失败",it) }
+                .onFailure { failure ->
+                    android.util.Log.w("HongguoTV","播放进度回传失败",failure)
+                    // 设备档案被清理同样会掐断回传链路，静默轮换等下次节流窗口重试
+                    if((failure as? PassportReject)?.code==22L) library.rotateDevice()
+                }
         }
     }
     private fun releasePlayer() {

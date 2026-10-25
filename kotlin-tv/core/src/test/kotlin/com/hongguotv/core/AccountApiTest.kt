@@ -25,6 +25,43 @@ class AccountApiTest {
         assertEquals("sessionid=abc123; x-tt-token=xx|yy; odin_tt=bbb",AccountApi.extractCookiePairs(lines))
     }
 
+    /** Cookie 三层合并：显式覆盖底座、会话覆盖显式、底座字段（ttreq/空 csrf 占位）始终在场 */
+    @Test fun mergeCookiesOverridesLaterValues() {
+        val base="passport_csrf_token=; passport_csrf_token_default=; store-region=cn-gd; install_id=111; ttreq=t1"
+        assertEquals(
+            "passport_csrf_token=abc; passport_csrf_token_default=abc; store-region=cn-gd; install_id=111; ttreq=t1; passport_mfa_token=m1",
+            AccountApi.mergeCookies(base,"passport_csrf_token=abc; passport_csrf_token_default=abc; passport_mfa_token=m1"))
+        val merged=AccountApi.mergeCookies(AccountApi.mergeCookies(base,"passport_csrf_token=abc"),"install_id=222; sessionid=s1")
+        assertEquals("222",merged.split("; ").first { it.startsWith("install_id=") }.substringAfter('='))
+        assertTrue(merged.contains("sessionid=s1"))
+        assertTrue(merged.contains("ttreq=t1"))
+        assertTrue(merged.contains("passport_csrf_token=abc"))
+    }
+
+    /** 匿名 Cookie 底座：install_id 跟随现役档案、ttreq 缺省用静态票、空 csrf 占位必须在场 */
+    @Test fun anonymousCookieFollowsActiveDevice() {
+        val defaults=VendorConstants.defaultDevice()
+        val cookie=VendorConstants.anonymousCookie()
+        assertTrue(cookie.contains("passport_csrf_token=;"))
+        assertTrue(cookie.contains("install_id=${defaults["iid"]}"))
+        assertTrue(cookie.contains("ttreq=${VendorConstants.ANON_TTREQ}"))
+        assertTrue(cookie.contains("store-region=cn-gd"))
+        VendorConstants.deviceTtreq="1\$fresh"
+        try {
+            assertTrue(VendorConstants.anonymousCookie().contains("ttreq=1\$fresh"))
+        } finally { VendorConstants.deviceTtreq="" }
+    }
+
+    /** passport 22「非法应用」必须是类型化 PassportReject——应用层靠它触发设备轮换 */
+    @Test fun passportRejectIsTyped() {
+        val body="""{"data":{"description":"非法应用","error_code":22},"message":"error"}"""
+        val error=runCatching { AccountApi.parseLoginBody(body,emptyList(),"") }.exceptionOrNull()!!
+        assertTrue(error is PassportReject)
+        assertEquals(22L,(error as PassportReject).code)
+        val upsms=runCatching { AccountApi.interpretUpsms(JSONObject("{\"error_code\":22,\"message\":\"ERROR\"}"),emptyList(),"") }.exceptionOrNull()!!
+        assertEquals(22L,(upsms as PassportReject).code)
+    }
+
     /** form 编码：JSON 串整体转义、空格按 %20 */
     @Test fun formEncodingEscapesJsonValues() {
         val out=AccountApi.formUrlencoded(listOf("biz_params" to """{"a":"1","b":"x/y"}""","copywriting_key" to "sms login"))

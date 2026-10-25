@@ -14,6 +14,10 @@ import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONArray
 import org.json.JSONObject
 
+/** passport 业务拒绝（error_code 在 data 里）。22=非法应用：设备档案被服务端清理，
+ *  唯一出路是轮换设备档案（重新注册）后重试，重试登录本身无意义。 */
+class PassportReject(val code: Long,message: String): IOException(message)
+
 /**
  * - 登录：passport 短信验证码（novel.snssdk.com，全签名 + form 表单；
  *   手机号/验证码 XOR(0x05) hex 密文，mix_mode=1，type=3731 登录场景）。
@@ -191,6 +195,18 @@ class AccountApi(
             return pairs.entries.joinToString("; ") { "${it.key}=${it.value}" }
         }
 
+        /** 匿名底座与显式/会话 cookie 合并：后值覆盖、保持首现位置（与 extractCookiePairs 同口径） */
+        internal fun mergeCookies(base: String,extra: String): String {
+            val pairs=linkedMapOf<String,String>()
+            for(raw in listOf(base,extra)) for(line in raw.split("; ")) {
+                val at=line.indexOf('=')
+                if(at<=0) continue
+                val key=line.substring(0,at).trim()
+                if(key.isNotEmpty()) pairs[key]=line.substring(at+1)
+            }
+            return pairs.entries.joinToString("; ") { "${it.key}=${it.value}" }
+        }
+
         internal fun formUrlencoded(pairs: List<Pair<String,String>>) = pairs.joinToString("&") { (k,v) -> Signer.encode(k)+"="+Signer.encode(v) }
 
         internal fun parseLoginBody(body: String,setCookies: List<String>,tokenHeader: String): LoginResult {
@@ -257,7 +273,7 @@ class AccountApi(
                 }
                 return UpsmsState.Waiting  // 防御形态：code=0 但缺 registered，按等待处理
             }
-            throw IOException("MFA 验证失败 $code: ${o.str("message").ifEmpty { "未知错误" }}")
+            throw PassportReject(code,"MFA 验证失败 $code: ${o.str("message").ifEmpty { "未知错误" }}")
         }
 
         private fun fieldOf(o: JSONObject?,vararg keys: String): String {
@@ -285,7 +301,7 @@ class AccountApi(
             if(code==0L) return
             val data=o.optJSONObject("data")
             val message=sequenceOf(data?.str("description"),data?.str("message"),o.str("message")).firstOrNull { !it.isNullOrEmpty() } ?: "未知错误"
-            throw IOException("$prefix $code: $message")
+            throw PassportReject(code,"$prefix $code: $message")
         }
 
         private fun requireCodeOk(o: JSONObject,prefix: String) {
@@ -345,7 +361,7 @@ class AccountApi(
         val builder=Request.Builder().url(signed.url)
         signed.headers.forEach { (k,v) -> if(!k.equals("Content-Type",true)) builder.header(k,v) }
         builder.header("Content-Type",FORM_TYPE)
-        if(cookie.isNotEmpty()) builder.header("Cookie",cookie)
+        builder.header("Cookie",cookieHeader(cookie))
         return call(builder.post(body.toRequestBody(FORM_TYPE.toMediaType())).build())
     }
 
@@ -355,11 +371,19 @@ class AccountApi(
         return listOf("x-ss-dp" to "8662","lc" to "101","x-reading-request" to "${clock()}-$ticket")
     }
 
+    /** Cookie 三层合并：匿名底座（install_id/ttreq/store-region + 空 csrf 占位，reading 系
+     *  按 install_id 风控、passport 缺 csrf 空值会走换绑分支报 1001）→ 本次调用显式
+     *  cookie（csrf/mfa token）→ 已登录会话。设备级字段必须始终在场。 */
+    private fun cookieHeader(explicit: String): String {
+        val base=VendorConstants.anonymousCookie()
+        val session=session ?: return if(explicit.isEmpty()) base else mergeCookies(base,explicit)
+        return mergeCookies(if(explicit.isEmpty()) base else mergeCookies(base,explicit),session.cookies)
+    }
+
     private fun sessionHeaders(): List<Pair<String,String>> {
-        val current=session ?: return emptyList()
-        val headers=mutableListOf("Cookie" to current.cookies)
-        // x-tt-token 短形式（前 56 位）随业务请求携带，服务端滑动续期时下发新值
-        if(current.token.isNotEmpty()) headers+="x-tt-token" to current.token.take(56)
+        val current=session
+        val headers=mutableListOf("Cookie" to cookieHeader(""))
+        if(current!=null && current.token.isNotEmpty()) headers+="x-tt-token" to current.token.take(56)
         return headers
     }
 
