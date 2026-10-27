@@ -42,6 +42,37 @@ class ContentRepositoryTest {
         assertEquals("720P",repo.stream("123",720).quality)
     }
 
+    /** 新版接口：video_list 直接是 video_model 上的 JSONArray，清晰度/编码在 video_meta，密钥在 encrypt_info。 */
+    private fun newItem(url: String,definition: String,codec: String,withKey: Boolean=false) =
+        JSONObject().put("main_url",url)
+            .put("video_meta",JSONObject().put("definition",definition).put("codec_type",codec))
+            .put("encrypt_info",JSONObject().put("encryption_method","cenc-aes-ctr")
+                .put("spade_a",if(withKey) "lbwb8GG4KMRVvhvuU6kY4FSmKOh4oCnpUq4D1FOZAsh9gzWHhw==" else JSONObject.NULL))
+
+    private fun arrayRepository(vararg items: JSONObject) = repository { """{"data":{"123":{"video_model":{"video_list":[${items.joinToString(",")}]}}}}""" }
+
+    @Test fun arrayVideoListSelectsHighestCompatibleQualityAndDerivesKey() {
+        val repo=arrayRepository(newItem("https://example.com/low","480p","bytevc1"),newItem("https://example.com/hevc","1080p","bytevc1",withKey=true))
+        val result=repo.stream("123",1080)
+        assertEquals("https://example.com/hevc",result.url)
+        assertEquals("1080P",result.quality)
+        assertNotNull(result.key)
+    }
+
+    @Test fun arrayVideoListFiltersByteVc2HiddenInVideoMeta() {
+        val repo=arrayRepository(newItem("https://example.com/unsupported","1080p","bytevc2"),newItem("https://example.com/avc","720p","bytevc1"))
+        val result=repo.stream("123",1080)
+        assertEquals("https://example.com/avc",result.url)
+        assertEquals("720P",result.quality)
+    }
+
+    @Test fun arrayVideoListFallsBackToLowerGearBeyondQualityLimit() {
+        val repo=arrayRepository(newItem("https://example.com/hevc","1080p","bytevc1"),newItem("https://example.com/low","480p","bytevc1"))
+        val result=repo.stream("123",720)
+        assertEquals("https://example.com/low",result.url)
+        assertEquals("480P",result.quality)
+    }
+
     private fun repository(clock: () -> Long = System::currentTimeMillis, respond: (Request) -> String) = ContentRepository(
         OkHttpClient.Builder().addInterceptor { chain ->
             Response.Builder().request(chain.request()).protocol(Protocol.HTTP_1_1)

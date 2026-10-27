@@ -271,14 +271,10 @@ class ContentRepository(val http: OkHttpClient = OkHttpClient.Builder().connectT
     /**
      * 拉取 video_model。
      *
-     * 上游拒绝带签名的请求（返回 Code 110001），因此先按可工作的 Python 实现的方式尝试：
-     * 无签名 + 每次随机 device_id/iid + 多域名轮询；全部失败再回退原带签名请求。
-     * 随机设备号保持 18 位（10^17 ~ 10^18），避免被上游当作异常设备。
+     * 2026-10 实测：服务端对带签名的播放请求一律返回 200 + 空响应体，随机 device_id/iid 同样被拒；
+     * 只有携带真实注册设备档案（VendorConstants.device 的 device_id/iid）的无签名请求能拿到完整 JSON。
+     * 因此依次轮询多个接入域名，全部失败即抛错，不再做签名回退。
      */
-    private fun randomDevice(): Map<String,String> {
-        val id=(900000000000000000L..999999999999999999L).random().toString()
-        return VendorConstants.device + mapOf("device_id" to id, "iid" to id)
-    }
     private val videoApiCandidates = listOf(
         "https://api5-normal-sinfonlinec.fqnovel.com/novel/player/multi_video_model/v1/",
         "https://api5-normal-sinfonlineb.fqnovel.com/novel/player/multi_video_model/v1/",
@@ -290,9 +286,9 @@ class ContentRepository(val http: OkHttpClient = OkHttpClient.Builder().connectT
         o.optInt("Code",o.optInt("code",0))==0 && o.optJSONObject("data") != null
     }.getOrDefault(false)
 
-    private fun unsignedVideoModel(body: ByteArray): JSONObject? {
+    private fun videoModel(payload: ByteArray): JSONObject {
         for (base in videoApiCandidates) {
-            val url="$base?"+Signer.encode(randomDevice())
+            val url="$base?"+Signer.encode(VendorConstants.device)
             val headers=linkedMapOf(
                 "User-Agent" to VendorConstants.VIDEO_MODEL_UA,
                 "Accept" to "application/json; charset=utf-8,application/x-protobuf",
@@ -307,22 +303,57 @@ class ContentRepository(val http: OkHttpClient = OkHttpClient.Builder().connectT
             try {
                 val request=Request.Builder().url(url)
                 headers.forEach { (k,v) -> request.header(k,v) }
-                val raw=execute(request.post(body.toRequestBody("application/json; charset=UTF-8".toMediaType())).build())
+                val raw=execute(request.post(payload.toRequestBody("application/json; charset=UTF-8".toMediaType())).build())
                 if (videoModelOk(raw)) return JSONObject(raw)
             } catch (_: IOException) {
-                // 网络异常或上游非 2xx，换下一个域名继续
+                // 网络异常、非 2xx 或空响应体，换下一个域名继续
             }
         }
+        throw IOException("播放接口暂不可用")
+    }
+
+    /** video_list 定位：新版直接挂在 model 上（JSONArray），也可能藏在 dynamic_video / video_info.data / data 里。 */
+    private fun videoList(model: JSONObject): Any? {
+        model.opt("video_list")?.let { return it }
+        model.opt("dynamic_video_list")?.let { return it }
+        model.optJSONObject("dynamic_video")?.let { dyn ->
+            dyn.opt("dynamic_video_list")?.let { return it }
+            dyn.opt("video_list")?.let { return it }
+            dyn.opt("list")?.let { return it }
+        }
+        model.optJSONObject("video_info")?.optJSONObject("data")?.let { videoList(it)?.let { inner -> return inner } }
+        model.optJSONObject("data")?.let { videoList(it)?.let { inner -> return inner } }
         return null
     }
 
-    private fun videoModel(payload: ByteArray): JSONObject {
-        unsignedVideoModel(payload)?.let { return it }
-        // 回退：原带签名请求（部分网络环境下可能仍被接受）
-        val signed=signer.sign(videoApiCandidates[1],VendorConstants.device,payload)
-        val raw=text(signed.url,signed)
-        if (videoModelOk(raw)) return JSONObject(raw)
-        throw IOException("播放接口暂不可用")
+    /** key_seed 可能挂在 model 顶层或嵌套结构里；无则说明 main_url 本身就是明文直链。 */
+    private fun keySeed(model: JSONObject): ByteArray {
+        model.str("key_seed").takeIf { it.isNotEmpty() }?.let { return decode64(it) }
+        for(key in listOf("dynamic_video","video_info","data")) {
+            model.optJSONObject(key)?.let { nested -> keySeed(nested).takeIf { it.isNotEmpty() }?.let { return it } }
+        }
+        return ByteArray(0)
+    }
+
+    private fun codecLabel(item: JSONObject): String = item.str("codec_type").ifEmpty { item.optJSONObject("video_meta")?.str("codec_type").orEmpty() }
+
+    /** 展开 video_list（数组 / 按清晰度键名的对象 / 多层嵌套）为 清晰度数值 to 条目 列表。 */
+    private fun streamItems(videoList: Any?): List<Pair<Int,JSONObject>> {
+        val rows=ArrayList<Pair<Int,JSONObject>>()
+        fun hint(value: String)=Regex("(2160|1440|1080|720|576|540|480|360)").find(value.lowercase())?.value?.toInt() ?: 0
+        fun collect(value: Any?,hinted: Int) {
+            when(value) {
+                is JSONArray -> for(i in 0 until value.length()) collect(value.opt(i),hinted)
+                is JSONObject -> if(listOf("main_url","backup_url","backup_url_1","play_addr","spade_a","encrypt_info").any { value.has(it) && !value.isNull(it) }) {
+                    val meta=value.optJSONObject("video_meta")
+                    val label=value.str("definition").ifEmpty { value.str("vheight") }.ifEmpty { meta?.str("definition").orEmpty() }.ifEmpty { meta?.str("vheight").orEmpty() }
+                    val quality=if(label.isNotEmpty()) qualityNumber(label) else hinted
+                    if(quality>0) rows+=quality to value
+                } else value.keys().asSequence().forEach { k -> val v=value.opt(k); if(v is JSONObject || v is JSONArray) collect(v,if(k[0].isDigit()) k.toInt() else hint(k)) }
+            }
+        }
+        collect(videoList,0)
+        return rows
     }
 
     fun stream(id: String, maxQuality: Int = 1080): StreamInfo {
@@ -332,22 +363,34 @@ class ContentRepository(val http: OkHttpClient = OkHttpClient.Builder().connectT
         if(data.optInt("Code",data.optInt("code",0))!=0) throw IOException("播放接口暂不可用")
         val map=data.optJSONObject("data") ?: throw IOException("播放信息为空")
         val entry=map.optJSONObject(id) ?: map.keys().asSequence().mapNotNull { map.optJSONObject(it) }.firstOrNull() ?: throw IOException("播放信息为空")
-        val model=entry.optJSONObject("video_model") ?: JSONObject(entry.str("video_model"))
-        val raw=model.opt("fallback_api")
-        val fallback=when(raw) { is JSONObject -> raw.str("fallback_api"); is JSONArray -> raw.optString(0); else -> runCatching { JSONObject(raw.toString()).str("fallback_api") }.getOrDefault(raw.toString()) }
-        if(!fallback.startsWith("https://")) throw IOException("播放地址格式异常")
-        val info=JSONObject(text(fallback)).optJSONObject("video_info")?.optJSONObject("data") ?: throw IOException("没有播放资源")
-        val videoList=info.optJSONObject("video_list") ?: throw IOException("没有可用清晰度")
+        val model=entry.optJSONObject("video_model") ?: runCatching { JSONObject(entry.str("video_model")) }.getOrDefault(JSONObject())
+        // 新版把 video_list 直接放在 video_model 上（JSONArray，清晰度/编码在 video_meta、密钥在 encrypt_info）；
+        // 旧版才需要再请求 fallback_api 取 video_info.data.video_list。
+        var source=videoList(model)
+        var seed=keySeed(model)
+        if(source==null) {
+            val raw=model.opt("fallback_api")
+            val fallback=when(raw) { is JSONObject -> raw.str("fallback_api"); is JSONArray -> raw.optString(0); else -> runCatching { JSONObject(raw.toString()).str("fallback_api") }.getOrDefault(raw.toString()) }
+            if(!fallback.startsWith("https://")) throw IOException("播放地址格式异常")
+            val info=JSONObject(text(fallback))
+            source=videoList(info)
+            seed=keySeed(info)
+        }
+        if(source==null) throw IOException("没有可用清晰度")
         // ByteVC2 resources can expose playable audio but no video track in Android's MP4 extractor.
         // Keep missing legacy codec labels usable, but never select a known incompatible variant.
-        val rows=videoList.keys().asSequence().mapNotNull { k -> videoList.optJSONObject(k)?.let { k to it } }.filter {
-            it.second.str("main_url").isNotEmpty() && it.second.str("codec_type").lowercase() !in setOf("bytevc2","bvc2")
-        }.map { (k,o) -> Triple(qualityNumber(o.str("quality_desc").ifEmpty { o.str("height").ifEmpty { o.str("vheight").ifEmpty { o.str("quality").ifEmpty { k } } } }),k,o) }.sortedByDescending { it.first }.toList()
+        val rows=streamItems(source).filter { codecLabel(it.second).lowercase() !in setOf("bytevc2","bvc2") }.sortedByDescending { it.first }
         val selected=rows.firstOrNull { it.first<=maxQuality } ?: rows.lastOrNull() ?: throw IOException("没有电视可播放的清晰度，请稍后再试或选择其他剧集")
-        val item=selected.third; var url=cleanUrl(item.str("main_url")); val seed=info.str("key_seed")
-        if(seed.isNotEmpty()) url=MediaCrypto.decryptUrl(url,decode64(seed))
+        val item=selected.second
+        var url=cleanUrl(item.str("main_url"))
+        if(url.isEmpty()) {
+            val backup=item.opt("backup_url_1") ?: item.opt("backup_url")
+            url=cleanUrl(when(backup) { is JSONArray -> backup.optString(0); else -> backup?.toString().orEmpty() })
+        }
+        if(seed.isNotEmpty()) url=MediaCrypto.decryptUrl(url,seed)
         if(!url.startsWith("https://") && !url.startsWith("http://")) throw IOException("播放地址无效")
-        val key=item.str("spade_a").takeIf { it.isNotEmpty() }?.let(MediaCrypto::deriveKey)
+        val spade=item.str("spade_a").ifEmpty { item.optJSONObject("encrypt_info")?.str("spade_a").orEmpty() }
+        val key=spade.takeIf { it.isNotEmpty() }?.let(MediaCrypto::deriveKey)
         val quality=if(selected.first>0) "${selected.first}P"+(if(selected.first>maxQuality) "（兼容资源）" else "") else "自动"
         return StreamInfo(url,key,quality)
     }
