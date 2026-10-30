@@ -95,4 +95,35 @@ class DeviceRegisterTest {
         assertEquals("ss_app_log",json.getString("magic_tag"))
         assertEquals("cdid-x",json.getJSONObject("header").getString("cdid"))
     }
+
+    @Test
+    fun playbackRegisterBodyRoundTripsAndCarriesFingerprint() {
+        // 免签名通道 body：magic(6) + salt(32) + AES-128-CBC(sha512(gzip)‖gzip‖PKCS7)，解密必须还原注册 JSON
+        val identity=DeviceRegister.Identity("cdid-f","openudid-f","clientudid-f","reqid-f")
+        val now=1_760_000_000_000L
+        val plain=DeviceRegister.playbackRegisterJson(identity,now).toString().toByteArray(Charsets.UTF_8)
+        val salt=ByteArray(32){it.toByte()}
+        val iv=ByteArray(16){(it+1).toByte()}
+        val body=DeviceRegister.encryptPlaybackBody(plain,salt,iv)
+        assertEquals(0x74,body[0].toInt() and 255); assertEquals(0x63,body[1].toInt() and 255)
+        assertEquals(0x05,body[2].toInt() and 255); assertEquals(0x10,body[3].toInt() and 255)
+        for(i in 0 until 32) assertEquals(salt[i],body[6+i])
+        // 解密还原：key/iv = sha512(sha512(salt)‖SALT)
+        val saltHex="4dd4c2e6b83162090e52b3c7a6733ba41cb2462b829ab58a196b39db57177524f49baf7f08e8d68d26a72e37c1a95a2f1f05a51892aef2949732b62a38aadd58"
+        val saltBytes=ByteArray(64){i->saltHex.substring(i*2,i*2+2).toInt(16).toByte()}
+        val md=java.security.MessageDigest.getInstance("SHA-512")
+        md.update(java.security.MessageDigest.getInstance("SHA-512").digest(salt)); md.update(saltBytes)
+        val derived=md.digest()
+        val cipher=javax.crypto.Cipher.getInstance("AES/CBC/NoPadding")
+        cipher.init(javax.crypto.Cipher.DECRYPT_MODE,javax.crypto.spec.SecretKeySpec(derived.copyOfRange(0,16),"AES"),javax.crypto.spec.IvParameterSpec(derived.copyOfRange(16,32)))
+        val out=cipher.doFinal(body,6+32,body.size-6-32)
+        val pad=out[out.size-1].toInt(); val unpadded=out.copyOfRange(0,out.size-pad)
+        assertEquals(64,java.security.MessageDigest.getInstance("SHA-512").getDigestLength())
+        val gz=unpadded.copyOfRange(64,unpadded.size)
+        val jsonBytes=java.util.zip.GZIPInputStream(gz.inputStream()).readBytes()
+        val json=JSONObject(String(jsonBytes,Charsets.UTF_8))
+        assertEquals("ss_app_log",json.getString("magic_tag"))
+        assertEquals("cdid-f",json.getJSONObject("header").getString("cdid"))
+        assertEquals(38,json.getJSONObject("header").length())
+    }
 }

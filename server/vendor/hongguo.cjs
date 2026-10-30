@@ -19,6 +19,9 @@
 // 依赖沙箱能力：require('node:crypto')（rootRequire 直通）、Buffer、axios；Node<18 无 SM3 会签名失败。
 
 const crypto = require('node:crypto');
+const zlib = require('node:zlib');
+const os = require('node:os');
+const fs = require('node:fs');
 
 const SITE = 'https://hongguoduanju.com';
 const VIDEO_API = 'https://api5-normal-sinfonlineb.fqnovel.com/novel/player/multi_video_model/v1/';
@@ -481,24 +484,123 @@ function signedVideoRequest(payload) {
     return { url, headers, body };
 }
 
-// 播放接口备选域名。实测结论：带签名的请求常被拒（110001 未知异常），
-// 无签名 + 每次随机 device_id/iid + 多域名轮询可稳定返回 video_model。
-// 优先 sinfonlinec（与可工作的 Python 实现一致），b/lf/裸域作为回退。
+// 播放接口备选域名。2026-10-27 起新风控：随机合成 device_id/iid 与静态兜底档案都会被
+// 软拦截（HTTP 200 + 空 body）。正确路径 = 匿名 device_register 拿真实 identity
+// → 无签名 POST multi_video_model/v1（b/c 域优先，preload 端点兜底）→ 带签名回退。
 const VIDEO_API_CANDIDATES = [
-    'https://api5-normal-sinfonlinec.fqnovel.com/novel/player/multi_video_model/v1/',
     'https://api5-normal-sinfonlineb.fqnovel.com/novel/player/multi_video_model/v1/',
+    'https://api5-normal-sinfonlinec.fqnovel.com/novel/player/multi_video_model/v1/',
+    'https://api5-normal-sinfonlineb.fqnovel.com/novel/player/multi_video_model/preload/v1/',
+    'https://api5-normal-sinfonlinec.fqnovel.com/novel/player/multi_video_model/preload/v1/',
     'https://api5-normal-lf.fqnovel.com/novel/player/multi_video_model/v1/',
     'https://api5-normal.fqnovel.com/novel/player/multi_video_model/v1/',
 ];
-const VIDEO_MODEL_APP_UA = 'com.phoenix.read/71332 (Linux; U; Android 16; zh_CN; 25053RT47C; Build/BP2A.250605.031.A3; Cronet/TTNetVersion:04657795 2026-01-23 QuicVersion:c67e9834 2025-09-08)';
+const VIDEO_MODEL_APP_UA = 'com.phoenix.read/71532 (Linux; U; Android 9; SM-N9860; Build/PQ3A.190705.10241111;tt-ok/3.12.13.20)';
 const randomDeviceId = () => String(Math.floor(1e17 + Math.random() * (1e18 - 1e17)));
-// 无签名请求的设备参数：设备 id 每次随机生成（固定设备指纹会被上游拒绝）
-const unsignedVideoParams = () => ({
-    iid: randomDeviceId(), device_id: randomDeviceId(), ac: 'wifi', channel: 'update_64', aid: '8662', app_name: 'novelread',
-    version_code: '71332', version_name: '7.1.3.32', device_platform: 'android', os: 'android',
-    ssmix: 'a', device_type: '25053RT47C', device_brand: 'Redmi', language: 'zh', os_api: '36',
-    os_version: '16', manifest_version_code: '71332', resolution: '1280*2772', dpi: '520',
-    update_version_code: '71332', host_abi: 'arm64-v8a', dragon_device_type: 'phone', pv_player: '71332',
+
+// ---------- 匿名播放设备注册（ttEncrypt / device_register） ----------
+// 2026-10-27 风控：随机 device_id/iid 被 200 空 body 软拦截；真实注册身份可稳定取到 video_model。
+// 注册走 applog 免签名通道（log5-applog-lf），body = ttEncrypt(gzip(注册JSON))：
+//   746305100000 + random32 + AES-128-CBC(key=sha512(sha512(rand)+salt)[:16], iv=[16:32])
+//   明文 = sha512(gzip(JSON)) + gzip(JSON) + PKCS7
+const TTENCRYPT_SALT = Buffer.from('4dd4c2e6b83162090e52b3c7a6733ba41cb2462b829ab58a196b39db57177524f49baf7f08e8d68d26a72e37c1a95a2f1f05a51892aef2949732b62a38aadd58', 'hex');
+const REGISTER_URL = 'https://log5-applog-lf.fqnovel.com/service/2/device_register/?tt_data=a&cronet_version=8d40f833_2026-03-03&ttnet_version=4.2.243.31-douyin&use_store_region_cookie=1';
+const REGISTER_UA = 'com.phoenix.read/72232 (Linux; U; Android 16; zh_CN; 25053RT47C; Build/BP2A.250605.031.A3)';
+const DEVICE_CACHE_FILE = `${os.tmpdir()}/hongguo-playback-device.json`;
+let playbackDevicePromise = null;
+
+function ttEncryptBody(plain) {
+    const compressed = zlib.gzipSync(plain);
+    const rnd = crypto.randomBytes(32);
+    const derived = crypto.createHash('sha512').update(Buffer.concat([crypto.createHash('sha512').update(rnd).digest(), TTENCRYPT_SALT])).digest();
+    const padded = Buffer.concat([
+        crypto.createHash('sha512').update(compressed).digest(), compressed,
+        Buffer.alloc(16 - ((64 + compressed.length) % 16), 16 - ((64 + compressed.length) % 16)),
+    ]);
+    const cipher = crypto.createCipheriv('aes-128-cbc', derived.subarray(0, 16), derived.subarray(16, 32));
+    return Buffer.concat([Buffer.from('746305100000', 'hex'), rnd, cipher.update(padded), cipher.final()]);
+}
+
+function cachedPlaybackDevice() {
+    try {
+        const saved = JSON.parse(fs.readFileSync(DEVICE_CACHE_FILE, 'utf8'));
+        if (saved && /^\d{5,}$/.test(String(saved.device_id)) && /^\d{5,}$/.test(String(saved.install_id))) return saved;
+    } catch (e) { /* 无缓存或损坏，走注册 */ }
+    return null;
+}
+
+async function registerPlaybackDevice() {
+    const cached = cachedPlaybackDevice();
+    if (cached) return cached;
+    const now = Date.now();
+    const cdid = [crypto.randomBytes(4), crypto.randomBytes(2), crypto.randomBytes(2), crypto.randomBytes(2), crypto.randomBytes(6)].map((b) => b.toString('hex')).join('-');
+    const registerPayload = JSON.stringify({
+        magic_tag: 'ss_app_log',
+        header: {
+            display_name: '红果免费短剧', update_version_code: 73932, manifest_version_code: 73932,
+            app_version_minor: '7.3.9.32', aid: 8662, channel: 'update_64', package: 'com.phoenix.read',
+            app_version: '7.3.9.32', version_code: 73932, sdk_version: '3.7.0-rc.34-fanqie-xiaoshuo',
+            sdk_target_version: 29, git_hash: '3a88f4e', os: 'Android', os_version: '16', os_api: 36,
+            device_model: '25053RT47C', device_brand: 'Redmi', device_manufacturer: 'Redmi', cpu_abi: 'arm64-v8a',
+            release_build: 'b5e187f', density_dpi: 520, display_density: 'mdpi', resolution: '1280x2772',
+            language: 'zh', timezone: 8, access: 'wifi', not_request_sender: 0, carrier: 'CHINA MOBILE',
+            rom: 'Redmi', rom_version: 'BP2A.250605.031.A3', cdid, sig_hash: 'aea615ab910015038f73c47e45d21466',
+            openudid: crypto.randomBytes(8).toString('hex'), clientudid: crypto.randomUUID(),
+            region: 'CN', tz_name: 'Asia/Shanghai', tz_offset: 28800, sim_region: 'cn',
+        },
+        _gen_time: now,
+    });
+    const body = ttEncryptBody(Buffer.from(registerPayload, 'utf8'));
+    const headers = {
+        'User-Agent': REGISTER_UA, Accept: 'application/json', 'Content-Type': 'application/octet-stream;tt-data=a',
+        'log-encode-type': 'gzip', 'x-ss-dp': '8662', 'x-ss-req-ticket': String(now),
+        'x-vc-bdturing-sdk-version': '4.0.3.cn', lc: '101', 'sdk-version': '2',
+        'passport-sdk-version': '5051452', 'x-neptune': '-8|50:51:59:30:40:47:49:39',
+        'x-ss-stub': crypto.createHash('md5').update(body).digest('hex').toUpperCase(),
+    };
+    // 实测风控：同 IP 任意一次 device_register 请求（含被拒的）后约 30-60 秒内的后续请求都会
+    // 返回 device_id=0。重试必须拉大间隔跨过冷却窗口，短间隔连发只会不断自我延长惩罚。
+    let lastError = null;
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+        try {
+            const resp = await axios.post(REGISTER_URL, body, { headers, timeout: 15000, responseType: 'text' });
+            const data = jsonBody(resp.data) || {};
+            const pick = (name) => {
+                const value = String(data[`${name}_str`] ?? data[name] ?? '').trim();
+                return /^\d+$/.test(value) && Number(value) > 0 ? value : '';
+            };
+            const deviceId = pick('device_id'); const installId = pick('install_id');
+            if (deviceId && installId) {
+                const identity = { device_id: deviceId, install_id: installId, cdid };
+                try { fs.writeFileSync(DEVICE_CACHE_FILE, JSON.stringify(identity)); } catch (e) { /* 缓存失败不影响播放 */ }
+                return identity;
+            }
+            lastError = new Error(`device_register 无效 device_id=${deviceId} install_id=${installId}`);
+        } catch (e) {
+            lastError = e;
+        }
+        if (attempt < 2) await new Promise((resolve) => setTimeout(resolve, attempt === 0 ? 20000 : 40000));
+    }
+    throw lastError ?? new Error('device_register 未知异常');
+}
+
+function ensurePlaybackDevice() {
+    if (!playbackDevicePromise) {
+        playbackDevicePromise = registerPlaybackDevice().catch((e) => {
+            playbackDevicePromise = null; // 失败不缓存，下次重试
+            throw e;
+        });
+    }
+    return playbackDevicePromise;
+}
+
+// 无签名请求的设备参数：优先用注册身份；注册失败时退回随机 id（会被软拦截，仅保留可观测）
+const unsignedVideoParams = (identity) => ({
+    iid: identity?.install_id || randomDeviceId(), device_id: identity?.device_id || randomDeviceId(), ac: 'wifi', channel: 'update_64', aid: '8662', app_name: 'novelread',
+    version_code: '71532', version_name: '7.1.5.32', device_platform: 'android', os: 'android',
+    ssmix: 'a', device_type: 'SM-N9860', device_brand: 'Samsung', language: 'zh', os_api: '28',
+    os_version: '9', manifest_version_code: '71532', resolution: '900*1600', dpi: '320',
+    update_version_code: '71532', host_abi: 'arm64-v8a', dragon_device_type: 'phone', pv_player: '71532',
     compliance_status: '0', need_personal_recommend: '1', player_so_load: '1', is_android_pad_screen: '0',
 });
 const videoModelOk = (resp, data) => resp.status === 200 && data && Number(data.Code ?? data.code ?? 0) === 0 && data.data;
@@ -511,21 +613,35 @@ async function requestVideoModel(vid) {
     const body = Buffer.from(payload);
     let lastError = null;
 
-    // 第一优先：无签名 + 随机设备 + 多域名（实测可稳定取到 video_model）
-    for (const api of VIDEO_API_CANDIDATES) {
+    // 主路径：匿名注册设备 + 无签名 + 多域名。身份被风控清理时（200 空 body）强制换新重试一轮。
+    for (let round = 0; round < 2; round += 1) {
+        let identity = null;
         try {
-            const url = `${api}?${pythonUrlEncode(unsignedVideoParams())}`;
-            const headers = {
-                'User-Agent': VIDEO_MODEL_APP_UA, Accept: 'application/json; charset=utf-8,application/x-protobuf', 'Content-Type': 'application/json; charset=UTF-8',
-                'x-xs-from-web': '0', 'x-ss-req-ticket': String(Date.now()), 'x-tt-request-tag': 't=0;n=0',
-                'sdk-version': '2', 'passport-sdk-version': '50561', 'x-vc-bdturing-sdk-version': '3.7.2.cn',
-            };
-            const resp = await axios.post(url, body, { headers, timeout: 20000, responseType: 'text' });
-            const data = jsonBody(resp.data);
-            if (videoModelOk(resp, data)) return data;
-            lastError = new Error(`video_model failed: ${data?.Message || data?.message || (data?.Code ?? data?.code) || resp.status}`);
+            identity = await ensurePlaybackDevice();
         } catch (e) {
             lastError = e;
+            log(`红果果设备注册失败(round=${round}): ${e.message}`);
+        }
+        for (const api of VIDEO_API_CANDIDATES) {
+            try {
+                const url = `${api}?${pythonUrlEncode(unsignedVideoParams(identity))}`;
+                const headers = {
+                    'User-Agent': VIDEO_MODEL_APP_UA, Accept: 'application/json; charset=utf-8,application/x-protobuf', 'Content-Type': 'application/json; charset=UTF-8',
+                    'x-xs-from-web': '0', 'x-ss-req-ticket': String(Date.now()), 'x-tt-request-tag': 't=0;n=0',
+                    'sdk-version': '2', 'passport-sdk-version': '50561', 'x-vc-bdturing-sdk-version': '3.7.2.cn',
+                };
+                const resp = await axios.post(url, body, { headers, timeout: 20000, responseType: 'text' });
+                const data = jsonBody(resp.data);
+                if (videoModelOk(resp, data)) return data;
+                lastError = new Error(`video_model failed: ${data?.Message || data?.message || (data?.Code ?? data?.code) || (resp.data?.length ? resp.status : '200 空 body')}`);
+            } catch (e) {
+                lastError = e;
+            }
+        }
+        if (round === 0) {
+            // 强制作废缓存身份并重新注册（同 IP 冷却约 60-90 秒，注册内部已带退避）
+            try { fs.rmSync(DEVICE_CACHE_FILE, { force: true }); } catch (e) { /* 忽略 */ }
+            playbackDevicePromise = null;
         }
     }
 

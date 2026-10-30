@@ -63,6 +63,10 @@ class Library(context: Context) {
     private val deviceLock = Any()
     private var deviceEnsured = false
     private var lastRotateAttempt = 0L
+    init {
+        // 播放全域名被拒（设备档案被风控清理）时，由 core 层回调轮换设备并重试
+        PlaybackDeviceRotation.rotator = { rotateDevice() }
+    }
     private var index: LibraryIndex? = null
     private var accountSession: AccountApi.Session? = null
     private val homes = mutableMapOf<ContentType, CatalogPage>()

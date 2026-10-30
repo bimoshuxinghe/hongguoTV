@@ -23,6 +23,13 @@ data class ComicRanking(val positions: Map<String,RankPosition>, val totalPages:
 data class CatalogPage(val items: List<Series>, val hasMore: Boolean, val ranking: ComicRanking? = null)
 data class StreamInfo(val url: String, val key: ByteArray?, val quality: String)
 
+/** 播放设备轮换钩子：video_model 全域名被拒（200 空 body = 设备档案被风控清理）时，
+ *  core 层经此请求应用壳重注册设备并换装档案；由 Library 启动时注入，未注入则跳过。 */
+object PlaybackDeviceRotation {
+    @Volatile var rotator: (()->Boolean)? = null
+    fun rotate(): Boolean = rotator?.invoke() ?: false
+}
+
 /** 一条弹幕：offsetMillis 为弹幕在视频中的位置，digg 为点赞数 */
 data class Danmaku(val offsetMillis: Long, val text: String, val digg: Int)
 class SearchSessionExpiredException: IOException("搜索结果已过期，请从第 1 页重新搜索")
@@ -287,6 +294,16 @@ class ContentRepository(val http: OkHttpClient = OkHttpClient.Builder().connectT
     }.getOrDefault(false)
 
     private fun videoModel(payload: ByteArray): JSONObject {
+        val data=videoModelOnce(payload)
+        // 2026-10-27 风控：现役设备档案被清理时所有域名都返回 200 空 body；轮换设备后重试一轮
+        if(data!=null) return data
+        if(PlaybackDeviceRotation.rotate()) {
+            videoModelOnce(payload)?.let { return it }
+        }
+        throw IOException("播放接口暂不可用")
+    }
+
+    private fun videoModelOnce(payload: ByteArray): JSONObject? {
         for (base in videoApiCandidates) {
             val url="$base?"+Signer.encode(VendorConstants.device)
             val headers=linkedMapOf(
@@ -309,7 +326,7 @@ class ContentRepository(val http: OkHttpClient = OkHttpClient.Builder().connectT
                 // 网络异常、非 2xx 或空响应体，换下一个域名继续
             }
         }
-        throw IOException("播放接口暂不可用")
+        return null
     }
 
     /** video_list 定位：新版直接挂在 model 上（JSONArray），也可能藏在 dynamic_video / video_info.data / data 里。 */

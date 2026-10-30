@@ -17,6 +17,7 @@
 package com.hongguotv.core
 
 import java.io.IOException
+import java.security.MessageDigest
 import java.security.SecureRandom
 import java.util.concurrent.TimeUnit
 import okhttp3.MediaType.Companion.toMediaType
@@ -29,13 +30,43 @@ import org.json.JSONObject
 object DeviceRegister {
     const val REGISTER_ORIGIN="https://log.snssdk.com"
     const val REGISTER_PATH="/service/2/device_register/"
+    /** 免签名兜底注册通道（log5-applog-lf，tt-data=a）：2026-10-27 风控后实测稳定 */
+    const val REGISTER_FALLBACK_URL="https://log5-applog-lf.fqnovel.com/service/2/device_register/?tt_data=a&cronet_version=8d40f833_2026-03-03&ttnet_version=4.2.243.31-douyin&use_store_region_cookie=1"
     /** 注册退避：一次注册（无论成败）后 24h 内不再尝试，避免高频注册触发指纹风控 */
     const val BACKOFF_MS=24*60*60*1000L
     /** 首次安装时间回拨（拟真参数：设备「刚装不久」，apk_first_install_time 与 query 共用） */
     private const val FIRST_INSTALL_BACKDATE_MS=12_000L
     private const val TT_DATA_TYPE="application/octet-stream;tt-data=a"
+    /** 免签名通道 ttEncrypt 派生盐（与 drpys 修复同源，实测可用） */
+    private val PLAYBACK_SALT=hex("4dd4c2e6b83162090e52b3c7a6733ba41cb2462b829ab58a196b39db57177524f49baf7f08e8d68d26a72e37c1a95a2f1f05a51892aef2949732b62a38aadd58")
 
     private val random=SecureRandom()
+
+    private fun hex(s: String): ByteArray {
+        val out=ByteArray(s.length/2)
+        for(i in out.indices) out[i]=s.substring(i*2,i*2+2).toInt(16).toByte()
+        return out
+    }
+    private fun sha512(vararg parts: ByteArray): ByteArray {
+        val digest=MessageDigest.getInstance("SHA-512")
+        parts.forEach { digest.update(it) }
+        return digest.digest()
+    }
+
+    /** 免签名通道 body 加密：magic(6) + salt(32) + AES-128-CBC(sha512(gzip) ‖ gzip ‖ PKCS7)，
+     *  key/iv = sha512(sha512(salt) ‖ PLAYBACK_SALT)[0..16]/[16..32]（drpys 修复同款，逐字节对拍验证） */
+    internal fun encryptPlaybackBody(plain: ByteArray,salt: ByteArray,iv: ByteArray): ByteArray {
+        val gz=java.io.ByteArrayOutputStream().also { out ->
+            java.util.zip.GZIPOutputStream(out).use { it.write(plain) }
+        }.toByteArray().also { it[8]=0; it[9]=0 } // gzip 头 XFL/OS 锁 00/00
+        val derived=sha512(sha512(salt),PLAYBACK_SALT)
+        val payload=sha512(gz)+gz
+        val pad=16-payload.size%16
+        val padded=payload+ByteArray(pad){pad.toByte()}
+        val cipher=javax.crypto.Cipher.getInstance("AES/CBC/NoPadding")
+        cipher.init(javax.crypto.Cipher.ENCRYPT_MODE,javax.crypto.spec.SecretKeySpec(derived.copyOfRange(0,16),"AES"),javax.crypto.spec.IvParameterSpec(derived.copyOfRange(16,32)))
+        return hex("746305100000")+salt+cipher.doFinal(padded)
+    }
 
     /** 新设备身份：cdid/clientudid/req_id 为 uuid v4，openudid 为 8 字节 hex */
     data class Identity(val cdid: String,val openudid: String,val clientudid: String,val reqId: String)
@@ -174,8 +205,19 @@ object DeviceRegister {
         return Profile(deviceId,installId,identity.cdid,identity.openudid,ttreq)
     }
 
-    /** 注册一台全新设备；失败抛 IOException，调用方回落静态兜底档案并记 24h 退避 */
+    /** 注册一台全新设备：先走带签名通道，失败（含 device_id=0 静默拒绝）回落免签名 log5 通道 */
     fun register(http: OkHttpClient=defaultHttp(),clock: ()->Long=System::currentTimeMillis): Profile {
+        return try {
+            registerSigned(http,clock)
+        } catch (signedError: Exception) {
+            try { registerUnsigned(http,clock) } catch (fallbackError: Exception) {
+                throw IOException("设备注册失败（签名通道: ${signedError.message}；免签名通道: ${fallbackError.message}）", fallbackError)
+            }
+        }
+    }
+
+    /** 带签名注册（log.snssdk.com，原通道） */
+    private fun registerSigned(http: OkHttpClient=defaultHttp(),clock: ()->Long=System::currentTimeMillis): Profile {
         val nowMs=clock()
         val identity=freshIdentity()
         val query=registerQuery(identity.cdid,identity.openudid,nowMs)
@@ -204,4 +246,86 @@ object DeviceRegister {
     internal fun defaultHttp(): OkHttpClient=OkHttpClient.Builder()
         .connectTimeout(8,TimeUnit.SECONDS).readTimeout(15,TimeUnit.SECONDS).callTimeout(20,TimeUnit.SECONDS)
         .dns(Ipv4FirstDns).build()
+
+    /** AppLog 注册 JSON 的免签名通道模板（73932 Redmi 档案，drpys 修复同源实测可用） */
+    internal fun playbackRegisterJson(identity: Identity,nowMs: Long): JSONObject {
+        val h=JSONObject()
+        h.put("display_name","红果免费短剧")
+        h.put("update_version_code",73932)
+        h.put("manifest_version_code",73932)
+        h.put("app_version_minor","7.3.9.32")
+        h.put("aid",8662)
+        h.put("channel","update_64")
+        h.put("package","com.phoenix.read")
+        h.put("app_version","7.3.9.32")
+        h.put("version_code",73932)
+        h.put("sdk_version","3.7.0-rc.34-fanqie-xiaoshuo")
+        h.put("sdk_target_version",29)
+        h.put("git_hash","3a88f4e")
+        h.put("os","Android")
+        h.put("os_version","16")
+        h.put("os_api",36)
+        h.put("device_model","25053RT47C")
+        h.put("device_brand","Redmi")
+        h.put("device_manufacturer","Redmi")
+        h.put("cpu_abi","arm64-v8a")
+        h.put("release_build","b5e187f")
+        h.put("density_dpi",520)
+        h.put("display_density","mdpi")
+        h.put("resolution","1280x2772")
+        h.put("language","zh")
+        h.put("timezone",8)
+        h.put("access","wifi")
+        h.put("not_request_sender",0)
+        h.put("carrier","CHINA MOBILE")
+        h.put("rom","Redmi")
+        h.put("rom_version","BP2A.250605.031.A3")
+        h.put("cdid",identity.cdid)
+        h.put("sig_hash","aea615ab910015038f73c47e45d21466")
+        h.put("openudid",identity.openudid)
+        h.put("clientudid",identity.clientudid)
+        h.put("region","CN")
+        h.put("tz_name","Asia/Shanghai")
+        h.put("tz_offset",28800)
+        h.put("sim_region","cn")
+        return JSONObject().put("magic_tag","ss_app_log").put("header",h).put("_gen_time",nowMs)
+    }
+
+    /** 免签名注册（log5-applog-lf，tt-data=a）：body = ttEncrypt 变体，无签名头，服务端按 body 指纹发放设备号。
+     *  实测同 IP 一次注册请求后约 30-60 秒内的后续请求会被静默拒（device_id=0），调用方需自行退避重试。 */
+    fun registerUnsigned(http: OkHttpClient=defaultHttp(),clock: ()->Long=System::currentTimeMillis): Profile {
+        val nowMs=clock()
+        val identity=freshIdentity()
+        val plain=playbackRegisterJson(identity,nowMs).toString().toByteArray(Charsets.UTF_8)
+        val salt=ByteArray(32).also(random::nextBytes)
+        val iv=ByteArray(16).also(random::nextBytes)
+        val body=encryptPlaybackBody(plain,salt,iv)
+        val builder=Request.Builder().url(REGISTER_FALLBACK_URL)
+        listOf(
+            "User-Agent" to "com.phoenix.read/72232 (Linux; U; Android 16; zh_CN; 25053RT47C; Build/BP2A.250605.031.A3)",
+            "Accept" to "application/json",
+            "log-encode-type" to "gzip",
+            "x-ss-dp" to "8662",
+            "x-ss-req-ticket" to nowMs.toString(),
+            "x-vc-bdturing-sdk-version" to "4.0.3.cn",
+            "lc" to "101",
+            "sdk-version" to "2",
+            "passport-sdk-version" to "5051452",
+            "x-neptune" to "-8|50:51:59:30:40:47:49:39",
+            "x-ss-stub" to md5Hex(body),
+        ).forEach { (k,v) -> builder.header(k,v) }
+        builder.header("Content-Type",TT_DATA_TYPE)
+        val raw=RequestScope.execute(http.newCall(builder.post(body.toRequestBody(TT_DATA_TYPE.toMediaType())).build())) { response ->
+            if(!response.isSuccessful) throw IOException("免签名设备注册请求失败（HTTP ${response.code}）")
+            val bytes=response.body?.bytes() ?: ByteArray(0)
+            if(bytes.isEmpty()) throw IOException("免签名设备注册返回空响应")
+            Pair(String(bytes,Charsets.UTF_8),response.headers("Set-Cookie"))
+        }
+        val ttreq=raw.second.firstOrNull { it.substringBefore(';').trim().startsWith("ttreq=") }
+            ?.substringBefore(';')?.trim()?.substringAfter('=') ?: ""
+        return parseRegister(raw.first,identity,ttreq)
+    }
+
+    private fun md5Hex(data: ByteArray): String =
+        java.math.BigInteger(1,MessageDigest.getInstance("MD5").digest(data)).toString(16).padStart(32,'0').uppercase()
 }
